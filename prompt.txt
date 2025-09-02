@@ -1,0 +1,52 @@
+Create a production-ready Golang web backend project scaffold using the Gin web framework. The project must follow a clean modular folder structure and include the following features:
+
+1. 🔐 **Authentication & Authorization**
+   - Implement JWT-based authentication.
+   - Include user registration and login routes.
+   - Add middleware to protect private routes using JWT.
+   - Support **role-based access control (RBAC)** with roles like "admin", "user", "superadmin".
+   - Admin-only endpoints should be restricted accordingly.
+
+2. 📁 **Project Structure**
+   - Use a clean architecture with modular separation (e.g., `controllers`, `routes`, `middlewares`, `models`, `services`, `utils`, `config`, `database`, etc.).
+   - Include an `.env`-based configuration system.
+
+3. 📊 **API Health Tracking**
+   - Create middleware to track and log API metrics.
+   - Log the number of requests per endpoint.
+   - Track success and failure counts.
+   - Optionally expose an endpoint `/metrics` or `/health` to display aggregated API stats in JSON format.
+
+4. 📡 **SMS & Email OTP Integration**
+   - Add service logic to send OTP codes via:
+     - Email (use SMTP or an external provider like SendGrid or Mailgun).
+     - SMS (use Twilio or another SMS provider).
+   - Include endpoints for sending OTPs and verifying them.
+   - Use OTPs for 2FA (Two-Factor Auth) or password resets.
+
+5. ✉️ **Email Notifications**
+   - Add functionality to send transactional emails (e.g., on registration, password change).
+   - Use a templating system for email bodies (HTML + plain text fallback).
+
+6. 🔐 **Middleware**
+   - JWT verification middleware.
+   - Role-check middleware.
+   - API usage tracking middleware.
+   - Panic recovery middleware with error logging.
+
+7. 🧪 **Extras**
+   - Provide example `.env` config.
+   - Add initial user seeding for testing (e.g., default admin user).
+   - Include Swagger/OpenAPI docs or Postman collection if possible.
+   - Optional: Integrate Redis for rate limiting or OTP storage.
+
+8. 🧠 **Tech Stack**
+   - Gin (web framework)
+   - GORM or SQLX (for DB ORM)
+   - PostgreSQL or MySQL (relational DB)
+   - Go modules
+   - dotenv config
+   - SMTP/Twilio integrations for email/SMS
+   - Use Go 1.20+
+
+The output should be a fully working codebase that I can run locally with Docker or directly with `go run main.go`. Include README instructions for setup and .env example.
