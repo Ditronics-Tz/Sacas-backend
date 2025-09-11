@@ -10,6 +10,7 @@ require (
 	github.com/sendgrid/sendgrid-go v3.16.1+incompatible
 	github.com/twilio/twilio-go v1.27.0
 	golang.org/x/crypto v0.33.0
+	gorm.io/datatypes v1.2.6
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.30.1
 )
@@ -55,6 +56,5 @@ require (
 	golang.org/x/text v0.22.0 // indirect
 	google.golang.org/protobuf v1.30.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	gorm.io/datatypes v1.2.6 // indirect
 	gorm.io/driver/mysql v1.5.6 // indirect
 )
