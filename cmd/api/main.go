@@ -77,6 +77,14 @@ func main() {
 	logger.Info("  - GET  /api/protected/profile")
 	logger.Info("  - GET  /api/protected/admin/dashboard")
 	logger.Info("  - GET  /api/protected/superadmin/dashboard")
+	logger.Info("Timetable System Endpoints:")
+	logger.Info("  - POST /api/protected/timetable/faculties")
+	logger.Info("  - GET  /api/protected/timetable/faculties")
+	logger.Info("  - POST /api/protected/timetable/staff")
+	logger.Info("  - GET  /api/protected/timetable/staff")
+	logger.Info("  - POST /api/protected/timetable/generate")
+	logger.Info("  - GET  /api/protected/timetable/class/:class_id")
+	logger.Info("  - GET  /api/protected/timetable/staff/:staff_id")
 
 	err = router.Run(":" + port)
 	if err != nil {
