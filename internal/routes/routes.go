@@ -18,8 +18,9 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	userRepo := repositories.NewUserRepository(db)
 	facultyRepo := repositories.NewFacultyRepository(db)
 	staffRepo := repositories.NewStaffRepository(db)
-	classRepo := repositories.NewClassRepository(db)
+	courseRepo := repositories.NewCourseRepository(db)
 	moduleRepo := repositories.NewModuleRepository(db)
+	classRepo := repositories.NewClassRepository(db)
 	roomRepo := repositories.NewRoomRepository(db)
 	subjectRepo := repositories.NewSubjectRepository(db)
 	timetableRepo := repositories.NewTimetableRepository(db)
@@ -32,6 +33,10 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	userController := controllers.NewUserController(userRepo)
 	facultyController := controllers.NewFacultyController(facultyRepo)
 	staffController := controllers.NewStaffController(staffRepo)
+	courseController := controllers.NewCourseController(courseRepo)
+	moduleController := controllers.NewModuleController(moduleRepo)
+	classController := controllers.NewClassController(classRepo)
+	roomController := controllers.NewRoomController(roomRepo)
 	timetableController := controllers.NewTimetableController(timetableRepo, timetableService)
 
 	// Security middleware
@@ -180,6 +185,30 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				timetable.GET("/faculties/:id", facultyController.GetFaculty)
 				timetable.PUT("/faculties/:id", facultyController.UpdateFaculty)
 				timetable.DELETE("/faculties/:id", facultyController.DeleteFaculty)
+
+				// Course endpoints
+				timetable.POST("/courses", courseController.CreateCourse)
+				timetable.GET("/courses", courseController.GetAllCourses)
+				timetable.GET("/courses/:id", courseController.GetCourse)
+				timetable.DELETE("/courses/:id", courseController.DeleteCourse)
+
+				// Module endpoints
+				timetable.POST("/modules", moduleController.CreateModule)
+				timetable.GET("/modules", moduleController.GetAllModules)
+				timetable.GET("/modules/:id", moduleController.GetModule)
+				timetable.DELETE("/modules/:id", moduleController.DeleteModule)
+
+				// Class endpoints
+				timetable.POST("/classes", classController.CreateClass)
+				timetable.GET("/classes", classController.GetAllClasses)
+				timetable.GET("/classes/:id", classController.GetClass)
+				timetable.DELETE("/classes/:id", classController.DeleteClass)
+
+				// Room endpoints
+				timetable.POST("/rooms", roomController.CreateRoom)
+				timetable.GET("/rooms", roomController.GetAllRooms)
+				timetable.GET("/rooms/:id", roomController.GetRoom)
+				timetable.DELETE("/rooms/:id", roomController.DeleteRoom)
 
 				// Staff endpoints
 				timetable.POST("/staff", staffController.CreateStaff)
