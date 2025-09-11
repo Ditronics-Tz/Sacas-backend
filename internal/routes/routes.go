@@ -16,11 +16,23 @@ import (
 func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTPController, redisClient *redis.Client) {
 	// Initialize repositories and services
 	userRepo := repositories.NewUserRepository(db)
+	facultyRepo := repositories.NewFacultyRepository(db)
+	staffRepo := repositories.NewStaffRepository(db)
+	classRepo := repositories.NewClassRepository(db)
+	moduleRepo := repositories.NewModuleRepository(db)
+	roomRepo := repositories.NewRoomRepository(db)
+	subjectRepo := repositories.NewSubjectRepository(db)
+	timetableRepo := repositories.NewTimetableRepository(db)
+	
 	notificationService := services.NewNotificationService()
+	timetableService := services.NewTimetableService(timetableRepo, staffRepo, classRepo, moduleRepo, roomRepo, subjectRepo)
 	
 	// Initialize controllers
 	authController := controllers.NewAuthController(userRepo, notificationService, redisClient)
 	userController := controllers.NewUserController(userRepo)
+	facultyController := controllers.NewFacultyController(facultyRepo)
+	staffController := controllers.NewStaffController(staffRepo)
+	timetableController := controllers.NewTimetableController(timetableRepo, timetableService)
 
 	// Security middleware
 	securityConfig := middlewares.DefaultSecurityConfig()
@@ -156,6 +168,35 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 						},
 					})
 				})
+			}
+
+			// Timetable Management endpoints (Admin access required)
+			timetable := protected.Group("/timetable")
+			timetable.Use(middlewares.AdminMiddleware())
+			{
+				// Faculty endpoints
+				timetable.POST("/faculties", facultyController.CreateFaculty)
+				timetable.GET("/faculties", facultyController.GetAllFaculties)
+				timetable.GET("/faculties/:id", facultyController.GetFaculty)
+				timetable.PUT("/faculties/:id", facultyController.UpdateFaculty)
+				timetable.DELETE("/faculties/:id", facultyController.DeleteFaculty)
+
+				// Staff endpoints
+				timetable.POST("/staff", staffController.CreateStaff)
+				timetable.GET("/staff", staffController.GetAllStaff)
+				timetable.GET("/staff/:id", staffController.GetStaff)
+				timetable.PUT("/staff/:id", staffController.UpdateStaff)
+				timetable.DELETE("/staff/:id", staffController.DeleteStaff)
+
+				// Timetable endpoints
+				timetable.POST("/generate", timetableController.GenerateTimetable)
+				timetable.POST("/", timetableController.CreateTimetable)
+				timetable.GET("/:id", timetableController.GetTimetable)
+				timetable.PUT("/:id", timetableController.UpdateTimetable)
+				timetable.DELETE("/:id", timetableController.DeleteTimetable)
+				timetable.GET("/class/:class_id", timetableController.GetTimetableByClass)
+				timetable.GET("/staff/:staff_id", timetableController.GetTimetableByStaff)
+				timetable.GET("/validate", timetableController.ValidateTimetable)
 			}
 		}
 	}

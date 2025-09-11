@@ -14,6 +14,14 @@ func RunMigrations(db *gorm.DB) error {
 	// Auto migrate models
 	err := db.AutoMigrate(
 		&models.User{},
+		&models.Faculty{},
+		&models.Staff{},
+		&models.Course{},
+		&models.Module{},
+		&models.Class{},
+		&models.Room{},
+		&models.Subject{},
+		&models.Timetable{},
 	)
 	if err != nil {
 		log.Printf("Migration failed: %v", err)
@@ -62,5 +70,13 @@ func DropAllTables(db *gorm.DB) error {
 	
 	return db.Migrator().DropTable(
 		&models.User{},
+		&models.Faculty{},
+		&models.Staff{},
+		&models.Course{},
+		&models.Module{},
+		&models.Class{},
+		&models.Room{},
+		&models.Subject{},
+		&models.Timetable{},
 	)
 }
