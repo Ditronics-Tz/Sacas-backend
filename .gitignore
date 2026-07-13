@@ -7,7 +7,8 @@
 *.dll
 *.so
 *.dylib
-api
+# Built binary at repo root only (do not ignore cmd/api/)
+/api
 
 # Test binary, built with `go test -c`
 *.test
