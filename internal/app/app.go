@@ -39,7 +39,11 @@ func Run() error {
 
 	redisClient := database.InitRedis()
 	defer database.CloseRedis(redisClient)
-	logger.Info("Redis connection established")
+	if redisClient != nil {
+		logger.Info("Redis connection established")
+	} else {
+		logger.Warn("Redis unavailable — running without OTP store / rate-limit backend (dev OK)")
+	}
 
 	if config.GetEnv("ENV", "development") == "production" {
 		gin.SetMode(gin.ReleaseMode)

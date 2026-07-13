@@ -35,18 +35,21 @@ go run ./cmd/api
 
 ## Before first run (once)
 
-1. **Go installed** — `go version`
+1. **Go installed** — `go version` (you already have this)
 2. **PostgreSQL running** + database:
 
 ```sql
 CREATE DATABASE "SACAS";
 ```
 
-3. **Redis** on `localhost:6379` (Memurai or WSL redis)
+3. **Redis is optional in development** — if Redis is not running, the API still starts.
+   - Login as admin + CRUD timetable APIs work
+   - Email OTP / password-reset OTP need Redis later (Memurai on Windows is fine)
 4. Edit `.env` if your Postgres password is not `postgres`:
 
 ```env
 DATABASE_URL=host=localhost user=postgres password=YOUR_PASSWORD dbname=SACAS port=5432 sslmode=disable
+ENV=development
 ```
 
 ---

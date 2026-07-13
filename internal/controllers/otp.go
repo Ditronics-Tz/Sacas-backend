@@ -34,6 +34,11 @@ func (oc *OTPController) SendOTP(c *gin.Context) {
 		return
 	}
 
+	if oc.RedisClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis)"})
+		return
+	}
+
 	otp := services.GenerateOTP(6)
 	// Store OTP in Redis with 5 minutes expiry
 	if err := oc.RedisClient.Set(c, "otp:"+req.Email, otp, 5*time.Minute).Err(); err != nil {
@@ -65,6 +70,11 @@ func (oc *OTPController) VerifyOTP(c *gin.Context) {
 	var req VerifyOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if oc.RedisClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis)"})
 		return
 	}
 

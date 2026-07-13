@@ -27,7 +27,12 @@ func RateLimitMiddleware(redisClient *redis.Client) gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		// Dev without Redis: skip limiting so local go run . still works.
 		if redisClient == nil {
+			if config.GetEnv("ENV", "development") != "production" {
+				c.Next()
+				return
+			}
 			logger.Error("Rate limit enabled but Redis client is nil — fail closed")
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": "Rate limit store unavailable",
@@ -42,6 +47,11 @@ func RateLimitMiddleware(redisClient *redis.Client) gin.HandlerFunc {
 
 		n, err := redisClient.Incr(c, key).Result()
 		if err != nil {
+			if config.GetEnv("ENV", "development") != "production" {
+				logger.Warn("Rate limit redis error in dev — allowing request: %v", err)
+				c.Next()
+				return
+			}
 			logger.Error("Rate limit redis error: %v — fail closed", err)
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"error": "Rate limit store unavailable",

@@ -79,11 +79,14 @@ func (ac *AuthController) Register(c *gin.Context) {
 		return
 	}
 
-	// Send verification OTP
+	// Send verification OTP (requires Redis)
 	otp := services.GenerateOTP(6)
-	if err := ac.redisClient.Set(c, "verify:"+req.Email, otp, 15*time.Minute).Err(); err != nil {
+	if ac.redisClient == nil {
+		logger.Warn("Redis unavailable — cannot store verification OTP for %s (dev OTP: %s)", req.Email, otp)
+	} else if err := ac.redisClient.Set(c, "verify:"+req.Email, otp, 15*time.Minute).Err(); err != nil {
 		logger.Error("Failed to store verification OTP: %v", err)
 	} else {
+		logger.Info("DEV verification OTP for %s: %s", req.Email, otp)
 		if err := ac.notificationService.SendEmailOTP(req.Email, otp); err != nil {
 			logger.Error("Failed to send verification email: %v", err)
 		}
@@ -193,6 +196,11 @@ func (ac *AuthController) VerifyEmail(c *gin.Context) {
 		return
 	}
 
+	if ac.redisClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis for email verification)"})
+		return
+	}
+
 	// Verify OTP
 	storedOTP, err := ac.redisClient.Get(c, "verify:"+req.Email).Result()
 	if err == redis.Nil {
@@ -259,6 +267,11 @@ func (ac *AuthController) ForgotPassword(c *gin.Context) {
 		return
 	}
 
+	if ac.redisClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis for password reset)"})
+		return
+	}
+
 	// Generate and store reset OTP
 	otp := services.GenerateOTP(6)
 	if err := ac.redisClient.Set(c, "reset:"+req.Email, otp, 15*time.Minute).Err(); err != nil {
@@ -290,6 +303,11 @@ func (ac *AuthController) ResetPassword(c *gin.Context) {
 	var req ResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if ac.redisClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis for password reset)"})
 		return
 	}
 
@@ -372,6 +390,11 @@ func (ac *AuthController) ResendVerificationOTP(c *gin.Context) {
 		return
 	}
 
+	if ac.redisClient == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis)"})
+		return
+	}
+
 	// Generate and store new OTP
 	otp := services.GenerateOTP(6)
 	if err := ac.redisClient.Set(c, "verify:"+req.Email, otp, 15*time.Minute).Err(); err != nil {
@@ -379,6 +402,8 @@ func (ac *AuthController) ResendVerificationOTP(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate OTP"})
 		return
 	}
+
+	logger.Info("DEV verification OTP for %s: %s", req.Email, otp)
 
 	// Send verification email
 	if err := ac.notificationService.SendEmailOTP(req.Email, otp); err != nil {
