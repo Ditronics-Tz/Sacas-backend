@@ -66,7 +66,17 @@ Invoke-RestMethod http://localhost:8080/api/health
 
 Expect: `status` ok, `db` up, `redis` up.
 
-### 2) Login (seed admin)
+### 2) Login (demo accounts)
+
+All demo passwords: **`password`**
+
+| Email | Role | What they can do |
+|-------|------|------------------|
+| `admin@example.com` | `super_admin` | Full access (users + all timetable admin) |
+| `coordinator@sacas.local` | `administrator` | Timetable admin (faculties, rooms, generate, …) |
+| `scheduler@sacas.local` | `administrator` | Same as coordinator |
+| `lecturer@sacas.local` | `user` | Profile only — **no** timetable admin screens |
+| `viewer@sacas.local` | `user` | Profile only — test “insufficient permissions” |
 
 ```powershell
 $login = Invoke-RestMethod -Method POST -Uri http://localhost:8080/api/auth/login `
@@ -75,6 +85,12 @@ $login = Invoke-RestMethod -Method POST -Uri http://localhost:8080/api/auth/logi
 
 $login
 $token = $login.token
+```
+
+Re-seed demos anytime (server can stay running):
+
+```powershell
+go run ./cmd/seed_demo
 ```
 
 ### 3) Call a protected route

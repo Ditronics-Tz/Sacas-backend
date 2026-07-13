@@ -136,6 +136,4 @@ func InitLogger() {
 	default:
 		SetLevel(INFO)
 	}
-	
-	Info("Logger initialized with level: %s", logLevel)
 }

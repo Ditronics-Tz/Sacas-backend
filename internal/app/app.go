@@ -2,7 +2,9 @@ package app
 
 import (
 	"fmt"
+	"io"
 	"log"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -23,58 +25,36 @@ func Run() error {
 	}
 
 	logger.InitLogger()
-	logger.Info("Starting SACAS API (dev server)...")
+
+	// Quiet mode: no Gin route-registration spam; only our request/error logs
+	gin.SetMode(gin.ReleaseMode)
+	gin.DefaultWriter = io.Discard
+	gin.DefaultErrorWriter = os.Stderr
 
 	db := database.InitDB()
 	defer database.CloseDB(db)
-	logger.Info("Database connection established")
 
 	if err := database.RunMigrations(db); err != nil {
 		return fmt.Errorf("database migrations: %w", err)
 	}
 
 	if err := database.CreateInitialData(db); err != nil {
-		logger.Warn("Failed to create initial data: %v", err)
+		logger.Error("seed failed: %v", err)
 	}
 
 	redisClient := database.InitRedis()
 	defer database.CloseRedis(redisClient)
-	if redisClient != nil {
-		logger.Info("Redis connection established")
-	} else {
-		logger.Warn("Redis unavailable — running without OTP store / rate-limit backend (dev OK)")
-	}
 
-	if config.GetEnv("ENV", "development") == "production" {
-		gin.SetMode(gin.ReleaseMode)
-	}
-
-	jwtSecret, err := config.ResolveJWTSecret()
-	if err != nil {
+	if _, err := config.ResolveJWTSecret(); err != nil {
 		return fmt.Errorf("JWT configuration: %w", err)
 	}
-	if config.IsWeakJWTSecret(jwtSecret) {
-		logger.Warn("JWT_SECRET is a weak/dev default — do not use in production")
-	}
 
-	csrfState := config.GetEnv("CSRF_ENABLED", "false")
-	if csrfState == "true" {
-		logger.Info("CSRF_ENABLED=true — mutating requests require X-CSRF-Token")
-	} else {
-		logger.Info("CSRF_ENABLED=false — CSRF checks disabled (SPA dev mode)")
-	}
-	logger.Info("CORS_ALLOWED_ORIGINS=%s", config.GetEnv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"))
-
-	solverURL := config.GetEnv("SOLVER_URL", "")
-	if solverURL == "" {
-		logger.Info("SOLVER_URL=(empty) — using built-in greedy timetable engine")
-	} else {
-		logger.Info("SOLVER_URL=%s SOLVER_FALLBACK=%s", solverURL, config.GetEnv("SOLVER_FALLBACK", "false"))
-	}
-
-	router := gin.Default()
-	router.Use(middlewares.MetricsMiddleware())
+	// gin.New = no default Logger/Recovery; we add our own
+	router := gin.New()
+	_ = router.SetTrustedProxies(nil)
 	router.Use(middlewares.RecoveryMiddleware())
+	router.Use(middlewares.RequestLogger())
+	router.Use(middlewares.MetricsMiddleware())
 
 	notificationService := services.NewNotificationService()
 	otpController := controllers.NewOTPController(notificationService, redisClient)
@@ -91,15 +71,6 @@ func Run() error {
 
 func printDevBanner(port string) {
 	base := "http://localhost:" + port
-	logger.Info("========================================================")
-	logger.Info("  SACAS API is running")
-	logger.Info("  Base URL : %s", base)
-	logger.Info("  Health   : %s/api/health", base)
-	logger.Info("  Login    : POST %s/api/auth/login", base)
-	logger.Info("  Admin    : admin@example.com / password")
-	logger.Info("========================================================")
-	logger.Info("Quick try (PowerShell):")
-	logger.Info("  Invoke-RestMethod %s/api/health", base)
-	logger.Info("  Invoke-RestMethod -Method POST %s/api/auth/login -ContentType application/json -Body '{\"email\":\"admin@example.com\",\"password\":\"password\"}'", base)
-	logger.Info("Stop server: Ctrl+C")
+	// Short banner only — then pure request/error stream
+	fmt.Fprintf(os.Stdout, "\n  SACAS API  %s\n  health     %s/api/health\n  logging    requests + errors only (OPTIONS hidden)\n  stop       Ctrl+C\n\n", base, base)
 }

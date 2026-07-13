@@ -12,9 +12,7 @@ import (
 
 var redisClient *redis.Client
 
-// InitRedis connects to Redis. In development, failure is non-fatal and returns nil
-// so `go run .` still works without Redis (login/CRUD work; OTP/rate-limit limited).
-// In production, missing Redis is fatal.
+// InitRedis connects to Redis. In development, failure is non-fatal and returns nil.
 func InitRedis() *redis.Client {
 	redisAddr := config.GetEnv("REDIS_ADDR", "localhost:6379")
 	redisPassword := config.GetEnv("REDIS_PASSWORD", "")
@@ -37,9 +35,8 @@ func InitRedis() *redis.Client {
 		if env == "production" {
 			log.Fatalf("Failed to connect to Redis at %s: %v", redisAddr, err)
 		}
-		log.Printf("WARNING: Redis not available at %s (%v)", redisAddr, err)
-		log.Printf("WARNING: Continuing in development without Redis — OTP email verify and rate limits are limited.")
-		log.Printf("WARNING: Install Memurai or start Redis, then restart. Login as admin still works.")
+		// One quiet line only
+		log.Printf("redis: offline (%s) — continuing without OTP/rate-limit store", redisAddr)
 		redisClient = nil
 		return nil
 	}

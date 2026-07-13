@@ -1,10 +1,13 @@
 package middlewares
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"go_boilerplate/pkg/logger"
 )
 
 func MetricsMiddleware() gin.HandlerFunc {
@@ -51,9 +54,9 @@ func RecoveryMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
+				logger.Error("panic recovered: %v", err)
+				_ = c.Error(fmt.Errorf("panic: %v", err))
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal Server Error"})
-				// Log the panic (could be enhanced with a proper logging system)
-				// log.Printf("Panic recovered: %v", err)
 				c.Abort()
 			}
 		}()

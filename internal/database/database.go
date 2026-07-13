@@ -19,13 +19,7 @@ func InitDB() *gorm.DB {
 		Logger: logger.Default.LogMode(logger.Warn),
 	})
 	if err != nil {
-		log.Println("========================================================")
-		log.Println(" FAILED to connect to PostgreSQL")
-		log.Println(" Fix DATABASE_URL in your .env file, for example:")
-		log.Println(`   DATABASE_URL=host=localhost user=postgres password=YOUR_REAL_PASSWORD dbname=SACAS port=5432 sslmode=disable`)
-		log.Println(" Also ensure database exists:")
-		log.Println(`   CREATE DATABASE "SACAS";`)
-		log.Println("========================================================")
+		log.Printf("ERROR database: cannot connect — check DATABASE_URL in .env (user/password/dbname SACAS)")
 		log.Fatal(err)
 	}
 	return db

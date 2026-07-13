@@ -15,7 +15,6 @@ import (
 	"go_boilerplate/internal/models"
 	"go_boilerplate/internal/repositories"
 	"go_boilerplate/internal/services"
-	"go_boilerplate/pkg/logger"
 )
 
 func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTPController, redisClient *redis.Client) {
@@ -56,7 +55,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	// CSRF middleware — default OFF for SPA local dev; set CSRF_ENABLED=true in production
 	csrfEnabled := config.GetEnv("CSRF_ENABLED", "false") == "true"
 	if csrfEnabled {
-		logger.Info("CSRF protection: ON (CSRF_ENABLED=true)")
+		// CSRF on — no startup spam
 		csrfConfig := middlewares.CSRFConfig{
 			RedisClient: redisClient,
 			SkipPaths: []string{
@@ -66,7 +65,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 		}
 		router.Use(middlewares.CSRFMiddleware(csrfConfig))
 	} else {
-		logger.Info("CSRF protection: OFF (CSRF_ENABLED=false) — suitable for SPA local dev")
+		// CSRF off for SPA local dev
 	}
 
 	api := router.Group("/api")

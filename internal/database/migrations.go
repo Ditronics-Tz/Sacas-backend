@@ -9,9 +9,6 @@ import (
 
 // RunMigrations runs all database migrations
 func RunMigrations(db *gorm.DB) error {
-	log.Println("Starting database migrations...")
-
-	// Auto migrate models
 	err := db.AutoMigrate(
 		&models.User{},
 		&models.Faculty{},
@@ -27,40 +24,94 @@ func RunMigrations(db *gorm.DB) error {
 		log.Printf("Migration failed: %v", err)
 		return err
 	}
-
-	log.Println("Database migrations completed successfully")
 	return nil
 }
 
-// CreateInitialData creates initial data for the application
-func CreateInitialData(db *gorm.DB) error {
-	log.Println("Creating initial data...")
+// bcrypt hash for plaintext "password" (demo only — change in production)
+const demoPasswordHash = "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"
 
-	// Check if super admin exists
-	var count int64
-	db.Model(&models.User{}).Where("role = ?", models.RoleSuperAdmin).Count(&count)
-	
-	if count == 0 {
-		// Create default super admin user
-		superAdmin := models.User{
+// CreateInitialData seeds demo users for local testing (idempotent).
+func CreateInitialData(db *gorm.DB) error {
+	// Distinct phone numbers required (empty string is unique-constrained in DB)
+	demos := []models.User{
+		{
 			Email:       "admin@example.com",
-			Password:    "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", // password: "password"
+			Password:    demoPasswordHash,
 			FirstName:   "Super",
 			LastName:    "Admin",
+			PhoneNumber: "+255700000001",
 			Role:        models.RoleSuperAdmin,
 			IsActive:    true,
 			IsVerified:  true,
-		}
-
-		if err := db.Create(&superAdmin).Error; err != nil {
-			log.Printf("Failed to create super admin: %v", err)
-			return err
-		}
-		
-		log.Println("Default super admin created (email: admin@example.com, password: password)")
+		},
+		{
+			Email:       "coordinator@sacas.local",
+			Password:    demoPasswordHash,
+			FirstName:   "Campus",
+			LastName:    "Coordinator",
+			PhoneNumber: "+255700000002",
+			Role:        models.RoleAdmin,
+			IsActive:    true,
+			IsVerified:  true,
+		},
+		{
+			Email:       "scheduler@sacas.local",
+			Password:    demoPasswordHash,
+			FirstName:   "Timetable",
+			LastName:    "Officer",
+			PhoneNumber: "+255700000003",
+			Role:        models.RoleAdmin,
+			IsActive:    true,
+			IsVerified:  true,
+		},
+		{
+			Email:       "lecturer@sacas.local",
+			Password:    demoPasswordHash,
+			FirstName:   "Jane",
+			LastName:    "Lecturer",
+			PhoneNumber: "+255700000004",
+			Role:        models.RoleUser,
+			IsActive:    true,
+			IsVerified:  true,
+		},
+		{
+			Email:       "viewer@sacas.local",
+			Password:    demoPasswordHash,
+			FirstName:   "View",
+			LastName:    "Only",
+			PhoneNumber: "+255700000005",
+			Role:        models.RoleUser,
+			IsActive:    true,
+			IsVerified:  true,
+		},
 	}
 
-	log.Println("Initial data creation completed")
+	for _, u := range demos {
+		var existing models.User
+		err := db.Where("email = ?", u.Email).First(&existing).Error
+		if err == gorm.ErrRecordNotFound {
+			if err := db.Create(&u).Error; err != nil {
+				log.Printf("Failed to seed user %s: %v", u.Email, err)
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		// Ensure demo accounts stay usable for local testing
+		existing.Password = demoPasswordHash
+		existing.Role = u.Role
+		existing.IsActive = true
+		existing.IsVerified = true
+		existing.FirstName = u.FirstName
+		existing.LastName = u.LastName
+		existing.PhoneNumber = u.PhoneNumber
+		if err := db.Save(&existing).Error; err != nil {
+			log.Printf("Failed to refresh demo user %s: %v", u.Email, err)
+			return err
+		}
+	}
 	return nil
 }
 

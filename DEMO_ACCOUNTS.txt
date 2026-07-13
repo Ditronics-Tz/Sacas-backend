@@ -1,0 +1,59 @@
+SACAS DEMO ACCOUNTS
+===================
+Local testing only — do not use these passwords in production.
+
+Base URL (API):  http://localhost:8080
+Login endpoint:  POST /api/auth/login
+Frontend (if running): http://localhost:5173
+
+Password for ALL accounts below:
+  password
+
+
+ACCOUNTS
+--------
+
+1) Super Admin (full access)
+   Email:    admin@example.com
+   Password: password
+   Role:     super_admin
+
+2) Administrator / Coordinator (timetable admin)
+   Email:    coordinator@sacas.local
+   Password: password
+   Role:     administrator
+
+3) Administrator / Scheduler (timetable admin)
+   Email:    scheduler@sacas.local
+   Password: password
+   Role:     administrator
+
+4) Normal user / Lecturer (no timetable admin)
+   Email:    lecturer@sacas.local
+   Password: password
+   Role:     user
+
+5) Normal user / Viewer (no timetable admin)
+   Email:    viewer@sacas.local
+   Password: password
+   Role:     user
+
+
+QUICK POWERShell LOGIN TEST
+---------------------------
+Invoke-RestMethod -Method POST -Uri http://localhost:8080/api/auth/login `
+  -ContentType application/json `
+  -Body '{"email":"admin@example.com","password":"password"}'
+
+
+RE-SEED ACCOUNTS
+----------------
+cd C:\Users\User\Projects\timetable\Sacas-backend
+go run ./cmd/seed_demo
+
+
+NOTES
+-----
+- Timetable management needs role administrator or super_admin.
+- Role "user" can login but cannot open admin timetable screens.
+- Redis optional for local dev; login works without Redis.
