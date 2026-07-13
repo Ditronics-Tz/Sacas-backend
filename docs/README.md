@@ -1,28 +1,15 @@
-# SACAS documentation
+# SACAS Backend — docs index
 
-University timetable system: Go API + React (Vite) UI + OR-Tools solver.
-
-| Doc | Purpose |
-|-----|---------|
-| [setup.md](./setup.md) | Local + Docker runbook |
-| [api-contract.md](./api-contract.md) | HTTP API (source of truth) |
-| [domain-mapping.md](./domain-mapping.md) | UI labels ↔ backend models |
-| [solver-contract.md](./solver-contract.md) | Python solver request/response |
-| [DEPENDENCY_AUDIT.md](./DEPENDENCY_AUDIT.md) | Phase 8 frontend audit |
-| [backend.md](./backend.md) | Backend architecture notes |
-| [frontend.md](./frontend.md) | Frontend notes |
-| [integration.md](./integration.md) | Integration glue |
-
-Root `DECISIONS.md` records judgment calls across phases.
-
-## Quick start
-
-```bash
-# Full stack
-docker compose up --build
-
-# Or manual: Postgres + Redis + backend + solver + Vite UI
-# See setup.md
-```
-
-**Seed admin:** `admin@example.com` / `password` (`super_admin`)
+| Doc | Description |
+|-----|-------------|
+| [../README.md](../README.md) | **Main setup** — `go run .`, env, demos |
+| [RBAC_AUDIT.md](./RBAC_AUDIT.md) | Role × endpoint security matrix |
+| [api-contract.md](./api-contract.md) | REST paths and payloads |
+| [backend.md](./backend.md) | Architecture / layers |
+| [setup.md](./setup.md) | Detailed local setup |
+| [solver-contract.md](./solver-contract.md) | OR-Tools solver HTTP contract |
+| [domain-mapping.md](./domain-mapping.md) | UI labels ↔ models |
+| [integration.md](./integration.md) | FE/BE alignment notes |
+| [../HOW_TO_USE.md](../HOW_TO_USE.md) | Sample API calls |
+| [../DEMO_ACCOUNTS.txt](../DEMO_ACCOUNTS.txt) | Demo emails / passwords |
+| [../DECISIONS.md](../DECISIONS.md) | Engineering decisions |

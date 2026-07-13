@@ -27,24 +27,21 @@ winget install PostgreSQL.PostgreSQL
 go version
 ```
 
-Create the database (pgAdmin or `psql`):
-
 ```sql
 CREATE DATABASE "SACAS";
 ```
 
-**Redis is optional for local dev.** If Redis is offline, the API still boots; login + CRUD work. OTP email verify / rate-limit need Redis.
+**Redis is optional for local dev.** If offline, the API still boots; login + CRUD work. OTP / rate-limit need Redis when those features are used.
 
 ### 2. Configure `.env`
 
 ```powershell
 cd Sacas-backend
 copy .env.example .env
-# Edit DATABASE_URL — example:
 # DATABASE_URL=host=localhost user=postgres password=YOUR_PASSWORD dbname=SACAS port=5432 sslmode=disable
 ```
 
-Recommended local flags:
+Recommended:
 
 ```env
 ENV=development
@@ -60,16 +57,12 @@ LOG_OPTIONS=false
 go run .
 ```
 
-Also valid:
-
-```powershell
-go run ./cmd/api
-.\run.ps1
-```
-
+Also: `go run ./cmd/api` · `.\run.ps1`  
 Stop: **Ctrl+C**
 
-On success you get a short banner, then **request + error logs only** (no Gin route spam). CORS `OPTIONS` preflight is hidden unless `LOG_OPTIONS=true`.
+Logs show **requests + errors only** (no Gin route spam). Set `LOG_OPTIONS=true` to log CORS OPTIONS.
+
+Migrations + demo users seed automatically on boot.
 
 ### 4. Smoke test
 
@@ -81,27 +74,43 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8080/api/auth/login `
   -Body '{"email":"admin@example.com","password":"password"}'
 ```
 
-Migrations + demo seed run automatically on every boot.
-
 ---
 
 ## Demo accounts
 
-All passwords: **`password`**
+All passwords: **`password`** — see **[DEMO_ACCOUNTS.txt](./DEMO_ACCOUNTS.txt)**
 
-| Email | Role | Use for |
-|-------|------|---------|
-| `admin@example.com` | `super_admin` | Full access |
-| `coordinator@sacas.local` | `administrator` | Timetable admin UI |
-| `scheduler@sacas.local` | `administrator` | Timetable admin UI |
-| `lecturer@sacas.local` | `user` | Permissions test (no admin screens) |
-| `viewer@sacas.local` | `user` | Permissions test |
-
-Full list: **[DEMO_ACCOUNTS.txt](./DEMO_ACCOUNTS.txt)**  
-Re-seed without restarting (or on next `go run .`):
+| Email | Role |
+|-------|------|
+| `admin@example.com` | `super_admin` |
+| `coordinator@sacas.local` | `administrator` |
+| `scheduler@sacas.local` | `administrator` |
+| `lecturer@sacas.local` | `user` (no timetable admin API) |
+| `viewer@sacas.local` | `user` |
 
 ```powershell
-go run ./cmd/seed_demo
+go run ./cmd/seed_demo   # re-seed / refresh demos
+```
+
+---
+
+## RBAC (security)
+
+| Role | Access |
+|------|--------|
+| `user` | Profile / change-password only under `/api/protected` |
+| `administrator` | Users admin + all `/api/protected/timetable/*` + `/admin/*` |
+| `super_admin` | Everything + `/api/protected/superadmin/*` |
+
+- Role comes **only** from verified JWT claims (never from client headers/body).
+- All timetable routes use `AdminMiddleware` on the group.
+- Audit + matrix: **[docs/RBAC_AUDIT.md](./docs/RBAC_AUDIT.md)**
+- Prefer wiring new routes with `middlewares.RequireRole("administrator", "super_admin")`.
+
+```powershell
+# role=user must get 403
+# Authorization: Bearer <lecturer_token>
+# GET /api/protected/timetable/faculties  → 403
 ```
 
 ---
@@ -109,20 +118,20 @@ go run ./cmd/seed_demo
 ## Useful commands
 
 ```powershell
-go mod tidy                 # deps
+go mod tidy
 go run .                    # dev server
-go test ./...               # unit tests
+go test ./...
 go vet ./...
-go build -o bin\api.exe .   # binary
-.\test.ps1                  # test + vet + build
+go build -o bin\api.exe .
+.\test.ps1
 ```
 
-### Port already in use (`bind :8080`)
+**Port in use:**
 
 ```powershell
 netstat -ano | findstr :8080
 Stop-Process -Id <PID> -Force
-# or set PORT=8081 in .env
+# or PORT=8081 in .env
 ```
 
 ### Optional solver
@@ -146,46 +155,33 @@ SOLVER_URL=http://localhost:8090
 docker compose up --build
 ```
 
-Brings up Postgres, Redis, solver, and API.
-
 ---
 
 ## Layout
 
 ```
-main.go                 # go run . entry
-cmd/api/                # alternate entry (same app)
+main.go                 # go run .
+cmd/api/                # alternate entry
 cmd/seed_demo/          # re-seed demo users
 internal/
-  app/                  # bootstrap
-  controllers/
-  database/             # migrate + seed
-  middlewares/          # CORS, CSRF, JWT, rate limit, request logger
-  models/
-  repositories/
-  routes/
+  app/ middlewares/ routes/ controllers/ …
   services/             # timetable + solver client
-solver-service/         # optional OR-Tools microservice
-docs/                   # API + setup docs
-HOW_TO_USE.md           # hands-on API guide
-DEMO_ACCOUNTS.txt       # demo logins
+solver-service/         # optional OR-Tools
+docs/                   # API, RBAC audit, setup
+HOW_TO_USE.md
+DEMO_ACCOUNTS.txt
 .env.example
 ```
 
-## Docs
+## Docs index
 
 | File | Topic |
 |------|--------|
-| [HOW_TO_USE.md](./HOW_TO_USE.md) | Dev server, sample API calls |
-| [DEMO_ACCOUNTS.txt](./DEMO_ACCOUNTS.txt) | Demo emails / passwords |
+| [HOW_TO_USE.md](./HOW_TO_USE.md) | Hands-on API usage |
+| [DEMO_ACCOUNTS.txt](./DEMO_ACCOUNTS.txt) | Demo logins |
+| [docs/RBAC_AUDIT.md](./docs/RBAC_AUDIT.md) | Role × endpoint matrix |
 | [docs/api-contract.md](./docs/api-contract.md) | REST contract |
 | [docs/backend.md](./docs/backend.md) | Architecture |
-| [docs/setup.md](./docs/setup.md) | Full setup |
+| [docs/setup.md](./docs/setup.md) | Setup detail |
 | [docs/solver-contract.md](./docs/solver-contract.md) | Solver JSON |
 | [DECISIONS.md](./DECISIONS.md) | Engineering decisions |
-
-## Auth notes
-
-- Timetable routes require JWT + role **`administrator`** or **`super_admin`**
-- Header: `Authorization: Bearer <token>`
-- With `CSRF_ENABLED=false` (default for SPA local), no CSRF header needed
