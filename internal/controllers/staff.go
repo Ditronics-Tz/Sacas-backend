@@ -210,9 +210,9 @@ func (c *StaffController) DeleteStaff(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"message": "Staff deleted successfully"})
 }
 
-// AssignModule POST /staff/:staff_id/modules/:module_id
+// AssignModule POST /staff/:id/modules/:module_id
 func (c *StaffController) AssignModule(ctx *gin.Context) {
-	staffID, err := strconv.ParseUint(ctx.Param("staff_id"), 10, 32)
+	staffID, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
@@ -241,9 +241,9 @@ func (c *StaffController) AssignModule(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"message": "Module assigned to staff successfully"})
 }
 
-// UnassignModule DELETE /staff/:staff_id/modules/:module_id
+// UnassignModule DELETE /staff/:id/modules/:module_id
 func (c *StaffController) UnassignModule(ctx *gin.Context) {
-	staffID, err := strconv.ParseUint(ctx.Param("staff_id"), 10, 32)
+	staffID, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
@@ -263,9 +263,9 @@ func (c *StaffController) UnassignModule(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"message": "Module unassigned from staff successfully"})
 }
 
-// ListStaffModules GET /staff/:staff_id/modules
+// ListStaffModules GET /staff/:id/modules
 func (c *StaffController) ListStaffModules(ctx *gin.Context) {
-	staffID, err := strconv.ParseUint(ctx.Param("staff_id"), 10, 32)
+	staffID, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
@@ -286,9 +286,9 @@ func (c *StaffController) ListStaffModules(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"modules": modules})
 }
 
-// ListModuleStaff GET /modules/:module_id/staff
+// ListModuleStaff GET /modules/:id/staff
 func (c *StaffController) ListModuleStaff(ctx *gin.Context) {
-	moduleID, err := strconv.ParseUint(ctx.Param("module_id"), 10, 32)
+	moduleID, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid module ID"})
 		return

@@ -99,7 +99,7 @@ func TestAssignModule_HappyPath(t *testing.T) {
 	modRepo := newStubModuleRepo()
 	ctrl := NewStaffController(staffRepo, modRepo)
 	r := gin.New()
-	r.POST("/staff/:staff_id/modules/:module_id", ctrl.AssignModule)
+	r.POST("/staff/:id/modules/:module_id", ctrl.AssignModule)
 
 	req := httptest.NewRequest(http.MethodPost, "/staff/1/modules/2", nil)
 	w := httptest.NewRecorder()
@@ -115,7 +115,7 @@ func TestAssignModule_HappyPath(t *testing.T) {
 func TestAssignModule_StaffNotFound(t *testing.T) {
 	ctrl := NewStaffController(newStubStaffRepo(), newStubModuleRepo())
 	r := gin.New()
-	r.POST("/staff/:staff_id/modules/:module_id", ctrl.AssignModule)
+	r.POST("/staff/:id/modules/:module_id", ctrl.AssignModule)
 
 	req := httptest.NewRequest(http.MethodPost, "/staff/99/modules/2", nil)
 	w := httptest.NewRecorder()
@@ -128,7 +128,7 @@ func TestAssignModule_StaffNotFound(t *testing.T) {
 func TestAssignModule_ModuleNotFound(t *testing.T) {
 	ctrl := NewStaffController(newStubStaffRepo(), newStubModuleRepo())
 	r := gin.New()
-	r.POST("/staff/:staff_id/modules/:module_id", ctrl.AssignModule)
+	r.POST("/staff/:id/modules/:module_id", ctrl.AssignModule)
 
 	req := httptest.NewRequest(http.MethodPost, "/staff/1/modules/99", nil)
 	w := httptest.NewRecorder()
@@ -143,7 +143,7 @@ func TestUnassignModule_HappyPath(t *testing.T) {
 	_ = staffRepo.AssignModule(1, 2)
 	ctrl := NewStaffController(staffRepo, newStubModuleRepo())
 	r := gin.New()
-	r.DELETE("/staff/:staff_id/modules/:module_id", ctrl.UnassignModule)
+	r.DELETE("/staff/:id/modules/:module_id", ctrl.UnassignModule)
 
 	req := httptest.NewRequest(http.MethodDelete, "/staff/1/modules/2", nil)
 	w := httptest.NewRecorder()

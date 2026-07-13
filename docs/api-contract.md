@@ -171,7 +171,7 @@ List endpoints accept: `?limit=10&offset=0`.
 | GET | `/modules/:id` | |
 | PUT | `/modules/:id` | partial (`clear_course` bool to null course_id) |
 | DELETE | `/modules/:id` | |
-| GET | `/modules/:module_id/staff` | staff assigned to module |
+| GET | `/modules/:id/staff` | staff assigned to module |
 
 **`type`:** `core` \| `elective` \| `general_subject`  
 `course_id` null for general subjects.
@@ -224,9 +224,9 @@ List endpoints accept: `?limit=10&offset=0`.
 | GET | `/staff/:id` | |
 | PUT | `/staff/:id` | partial |
 | DELETE | `/staff/:id` | |
-| POST | `/staff/:staff_id/modules/:module_id` | assign |
-| DELETE | `/staff/:staff_id/modules/:module_id` | unassign |
-| GET | `/staff/:staff_id/modules` | list modules for staff |
+| POST | `/staff/:id/modules/:module_id` | assign |
+| DELETE | `/staff/:id/modules/:module_id` | unassign |
+| GET | `/staff/:id/modules` | list modules for staff |
 
 ### Subjects
 

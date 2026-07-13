@@ -287,7 +287,8 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				timetable.GET("/modules/:id", moduleController.GetModule)
 				timetable.PUT("/modules/:id", moduleController.UpdateModule)
 				timetable.DELETE("/modules/:id", moduleController.DeleteModule)
-				timetable.GET("/modules/:module_id/staff", staffController.ListModuleStaff)
+				// Use :id (same wildcard name as other /modules/:id routes — Gin requirement)
+				timetable.GET("/modules/:id/staff", staffController.ListModuleStaff)
 
 				// Class
 				timetable.POST("/classes", classController.CreateClass)
@@ -309,9 +310,10 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				timetable.GET("/staff/:id", staffController.GetStaff)
 				timetable.PUT("/staff/:id", staffController.UpdateStaff)
 				timetable.DELETE("/staff/:id", staffController.DeleteStaff)
-				timetable.POST("/staff/:staff_id/modules/:module_id", staffController.AssignModule)
-				timetable.DELETE("/staff/:staff_id/modules/:module_id", staffController.UnassignModule)
-				timetable.GET("/staff/:staff_id/modules", staffController.ListStaffModules)
+				// Gin requires the same wildcard name as /staff/:id
+				timetable.POST("/staff/:id/modules/:module_id", staffController.AssignModule)
+				timetable.DELETE("/staff/:id/modules/:module_id", staffController.UnassignModule)
+				timetable.GET("/staff/:id/modules", staffController.ListStaffModules)
 
 				// Subjects
 				timetable.POST("/subjects", subjectController.CreateSubject)
