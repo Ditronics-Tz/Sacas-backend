@@ -1,42 +1,71 @@
-# Local setup — run backend + frontend + solver
+# Local setup — backend (Windows Go commands preferred)
 
 ## Prerequisites
 
 | Tool | Version / notes |
 |------|------------------|
-| Go | 1.20+ (module says 1.23) |
-| Node.js | 18+ (Vite) |
-| npm | preferred |
-| Python | 3.11+ (solver local) |
-| PostgreSQL | local or Docker |
-| Redis | local or Docker |
-| Docker Compose | optional full stack |
+| Go | 1.23+ — `winget install GoLang.Go` |
+| PostgreSQL | local install — `winget install PostgreSQL.PostgreSQL` |
+| Redis | Memurai / WSL redis / any server on `localhost:6379` |
+| Python | optional — only if you run `solver-service` |
+| Docker | **optional** — not required |
+
+Default admin after first boot: `admin@example.com` / `password` (`super_admin`).
 
 ---
 
-## One-command stack (Docker)
+## Windows: normal Go commands (no Docker)
 
-From repo root:
+See also root **[README.md](../README.md)** section *Windows — run with normal Go commands*.
 
-```bash
+### 1. One-time installs
+
+```powershell
+winget install GoLang.Go
+winget install PostgreSQL.PostgreSQL
+# Redis: install Memurai (Windows) or run Redis in WSL
+```
+
+### 2. Create database
+
+```sql
+CREATE DATABASE "SACAS";
+```
+
+### 3. Start API
+
+From **this repo root** (`Sacas-backend/`):
+
+```powershell
+copy .env.example .env
+# Edit DATABASE_URL password if needed
+# Leave SOLVER_URL empty for greedy scheduler (easiest testing)
+
+.\run.ps1
+# equivalent:
+#   go mod tidy
+#   go run ./cmd/api
+```
+
+### 4. Smoke test
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/health
+
+Invoke-RestMethod -Method POST -Uri http://localhost:8080/api/auth/login `
+  -ContentType application/json `
+  -Body '{"email":"admin@example.com","password":"password"}'
+```
+
+### Docker (optional only)
+
+```powershell
 docker compose up --build
 ```
 
-Services:
-
-| Service | URL |
-|---------|-----|
-| Frontend | http://localhost:3000 |
-| Backend API | http://localhost:8080/api/health |
-| Solver | http://localhost:8090/health |
-| Postgres | localhost:5432 |
-| Redis | localhost:6379 |
-
-Default admin: `admin@example.com` / `password` (`super_admin`).
-
 ---
 
-## Manual local (no Docker)
+## Manual local notes
 
 ### 1. PostgreSQL + Redis
 
@@ -44,17 +73,13 @@ Default admin: `admin@example.com` / `password` (`super_admin`).
 CREATE DATABASE "SACAS";
 ```
 
-```bash
-docker run -d --name sacas-redis -p 6379:6379 redis:7
-# or local Redis
-```
+Redis must accept connections at `REDIS_ADDR` (default `localhost:6379`).
 
 ### 2. Backend
 
-```bash
+```powershell
 cd Sacas-backend
-copy .env.example .env    # Windows
-# set CSRF_ENABLED=false, CORS_ALLOWED_ORIGINS, DATABASE_URL, SOLVER_URL
+copy .env.example .env
 go mod tidy
 go run ./cmd/api
 ```
@@ -96,44 +121,43 @@ Health:
 Invoke-RestMethod http://localhost:8080/api/health
 ```
 
-### 3. Solver (Option A)
+### 3. Solver (optional)
 
-```bash
+Skip this for normal testing. Empty `SOLVER_URL` uses the Go greedy generator.
+
+```powershell
 cd solver-service
 python -m venv .venv
-.\.venv\Scripts\activate   # Windows
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:PYTHONPATH="."
+$env:PYTHONPATH = "."
 uvicorn app.main:app --host 0.0.0.0 --port 8090
-pytest -q
 ```
 
-### 4. Frontend (Vite)
+Then set `SOLVER_URL=http://localhost:8090` in `.env` and restart the API.
 
-```bash
-cd timetable_ui
+### 4. Frontend (separate repo: timetable_ui)
+
+```powershell
+cd ..\timetable_ui
 copy .env.example .env
+# VITE_API_URL=http://localhost:8080/api
 npm install
 npm run dev
 ```
 
 Open http://localhost:5173.
 
-```bash
-npm test
-npm run build
-npm run preview
-```
-
 ---
 
-## Suggested three-terminal workflow
+## Suggested two-terminal workflow (Windows, no Docker)
 
 | Terminal | Command |
 |----------|---------|
-| 1 | `cd Sacas-backend && go run ./cmd/api` |
-| 2 | `cd solver-service && uvicorn app.main:app --port 8090` |
-| 3 | `cd timetable_ui && npm run dev` |
+| 1 — API | `cd Sacas-backend` → `.\run.ps1` (or `go run ./cmd/api`) |
+| 2 — UI | `cd timetable_ui` → `npm run dev` |
+
+Solver terminal only if `SOLVER_URL` is set.
 
 ---
 
