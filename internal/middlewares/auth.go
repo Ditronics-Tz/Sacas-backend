@@ -93,24 +93,52 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 	}
 }
 
+// roleFromContext returns the JWT role claim as a string (never from client input).
+func roleFromContext(c *gin.Context) (string, bool) {
+	role, exists := c.Get("role")
+	if !exists || role == nil {
+		return "", false
+	}
+	switch v := role.(type) {
+	case string:
+		return strings.TrimSpace(v), v != ""
+	case models.UserRole:
+		s := strings.TrimSpace(string(v))
+		return s, s != ""
+	default:
+		s := strings.TrimSpace(fmt.Sprint(v))
+		if s == "" || s == "<nil>" {
+			return "", false
+		}
+		return s, true
+	}
+}
+
+// RoleMiddleware / RequireRole allow only the given roles from verified JWT claims.
 func RoleMiddleware(roles ...string) gin.HandlerFunc {
+	return RequireRole(roles...)
+}
+
+// RequireRole is the preferred name when wiring new routes:
+//
+//	group.Use(middlewares.RequireRole("administrator", "super_admin"))
+func RequireRole(roles ...string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(roles))
+	for _, r := range roles {
+		allowed[r] = struct{}{}
+	}
 	return func(c *gin.Context) {
-		role, exists := c.Get("role")
-		if !exists {
+		userRole, ok := roleFromContext(c)
+		if !ok {
 			logger.Warn("Role not found in token")
 			c.JSON(http.StatusForbidden, gin.H{"error": "Role not found in token"})
 			c.Abort()
 			return
 		}
-
-		userRole := role.(string)
-		for _, r := range roles {
-			if userRole == r {
-				c.Next()
-				return
-			}
+		if _, ok := allowed[userRole]; ok {
+			c.Next()
+			return
 		}
-
 		logger.Warn("Insufficient permissions for user with role: %s, required: %v", userRole, roles)
 		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
 		c.Abort()
@@ -118,11 +146,11 @@ func RoleMiddleware(roles ...string) gin.HandlerFunc {
 }
 
 func AdminMiddleware() gin.HandlerFunc {
-	return RoleMiddleware(string(models.RoleAdmin), string(models.RoleSuperAdmin))
+	return RequireRole(string(models.RoleAdmin), string(models.RoleSuperAdmin))
 }
 
 func SuperAdminMiddleware() gin.HandlerFunc {
-	return RoleMiddleware(string(models.RoleSuperAdmin))
+	return RequireRole(string(models.RoleSuperAdmin))
 }
 
 // ActiveUserLookup looks up a user by ID for active checks.

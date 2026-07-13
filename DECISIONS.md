@@ -65,3 +65,8 @@ Room building/room_no/description live in `features` JSON (extended shape docume
 ## Phase 10
 - Root `docker-compose.yml` orchestrates Postgres, Redis, backend, solver, frontend.
 - E2E: Playwright smoke script under `e2e/` where tooling allows; manual smoke checklist documented if browsers not installed.
+
+## RBAC audit (2026-07-13)
+
+Timetable group already used AdminMiddleware. Hardened RoleMiddleware type safety, added RequireRole factory + regression tests. Live probe: role=user → 403 on GET /timetable/faculties. Full matrix: docs/RBAC_AUDIT.md.
+
