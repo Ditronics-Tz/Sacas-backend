@@ -1,8 +1,10 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -12,7 +14,7 @@ import (
 )
 
 type TimetableController struct {
-	timetableRepo   repositories.TimetableRepository
+	timetableRepo    repositories.TimetableRepository
 	timetableService *services.TimetableService
 }
 
@@ -21,41 +23,37 @@ func NewTimetableController(
 	timetableService *services.TimetableService,
 ) *TimetableController {
 	return &TimetableController{
-		timetableRepo:   timetableRepo,
+		timetableRepo:    timetableRepo,
 		timetableService: timetableService,
 	}
 }
 
-// CreateTimetableRequest represents the request payload for creating a timetable entry
 type CreateTimetableRequest struct {
-	ClassID   uint             `json:"class_id" binding:"required"`
-	ModuleID  *uint            `json:"module_id"`
-	SubjectID *uint            `json:"subject_id"`
-	StaffID   uint             `json:"staff_id" binding:"required"`
-	RoomID    uint             `json:"room_id" binding:"required"`
-	Day       models.Weekday   `json:"day" binding:"required"`
-	StartTime string           `json:"start_time" binding:"required"`
-	EndTime   string           `json:"end_time" binding:"required"`
+	ClassID   uint           `json:"class_id" binding:"required"`
+	ModuleID  *uint          `json:"module_id"`
+	SubjectID *uint          `json:"subject_id"`
+	StaffID   uint           `json:"staff_id" binding:"required"`
+	RoomID    uint           `json:"room_id" binding:"required"`
+	Day       models.Weekday `json:"day" binding:"required"`
+	StartTime string         `json:"start_time" binding:"required"`
+	EndTime   string         `json:"end_time" binding:"required"`
 }
 
-// UpdateTimetableRequest represents the request payload for updating a timetable entry
 type UpdateTimetableRequest struct {
-	ClassID   *uint            `json:"class_id"`
-	ModuleID  *uint            `json:"module_id"`
-	SubjectID *uint            `json:"subject_id"`
-	StaffID   *uint            `json:"staff_id"`
-	RoomID    *uint            `json:"room_id"`
-	Day       *models.Weekday  `json:"day"`
-	StartTime *string          `json:"start_time"`
-	EndTime   *string          `json:"end_time"`
+	ClassID   *uint           `json:"class_id"`
+	ModuleID  *uint           `json:"module_id"`
+	SubjectID *uint           `json:"subject_id"`
+	StaffID   *uint           `json:"staff_id"`
+	RoomID    *uint           `json:"room_id"`
+	Day       *models.Weekday `json:"day"`
+	StartTime *string         `json:"start_time"`
+	EndTime   *string         `json:"end_time"`
 }
 
-// GenerateTimetableRequest represents the request for generating a timetable
 type GenerateTimetableRequest struct {
 	ClassID uint `json:"class_id" binding:"required"`
 }
 
-// CreateTimetable creates a new timetable entry
 func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
 	var req CreateTimetableRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
@@ -64,7 +62,6 @@ func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
 		return
 	}
 
-	// Validate that either ModuleID or SubjectID is provided, but not both
 	if (req.ModuleID == nil && req.SubjectID == nil) || (req.ModuleID != nil && req.SubjectID != nil) {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Either module_id or subject_id must be provided, but not both"})
 		return
@@ -81,8 +78,7 @@ func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
 		EndTime:   req.EndTime,
 	}
 
-	// Validate for conflicts
-	if err := c.timetableService.ValidateTimeSlot(timetable); err != nil {
+	if err := c.timetableService.ValidateTimeSlot(timetable, 0); err != nil {
 		logger.Error("Timetable validation failed: %v", err)
 		ctx.JSON(http.StatusConflict, gin.H{"error": "Scheduling conflict detected", "details": err.Error()})
 		return
@@ -94,7 +90,6 @@ func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
 		return
 	}
 
-	// Fetch the created timetable with relationships
 	created, err := c.timetableRepo.GetByID(timetable.ID)
 	if err != nil {
 		logger.Error("Failed to fetch created timetable: %v", err)
@@ -106,7 +101,6 @@ func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
 	ctx.JSON(http.StatusCreated, gin.H{"message": "Timetable entry created successfully", "timetable": created})
 }
 
-// GetTimetable gets a timetable entry by ID
 func (c *TimetableController) GetTimetable(ctx *gin.Context) {
 	idStr := ctx.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 32)
@@ -125,7 +119,6 @@ func (c *TimetableController) GetTimetable(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"timetable": timetable})
 }
 
-// GetTimetableByClass gets timetable for a specific class
 func (c *TimetableController) GetTimetableByClass(ctx *gin.Context) {
 	classIDStr := ctx.Param("class_id")
 	classID, err := strconv.ParseUint(classIDStr, 10, 32)
@@ -144,8 +137,8 @@ func (c *TimetableController) GetTimetableByClass(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"timetables": timetables})
 }
 
-// GetTimetableByStaff gets timetable for a specific staff member
 func (c *TimetableController) GetTimetableByStaff(ctx *gin.Context) {
+	// Route is /by-staff/:staff_id to avoid clashing with staff CRUD /staff/:id
 	staffIDStr := ctx.Param("staff_id")
 	staffID, err := strconv.ParseUint(staffIDStr, 10, 32)
 	if err != nil {
@@ -163,7 +156,6 @@ func (c *TimetableController) GetTimetableByStaff(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"timetables": timetables})
 }
 
-// UpdateTimetable updates an existing timetable entry
 func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 	idStr := ctx.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 32)
@@ -179,7 +171,6 @@ func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 		return
 	}
 
-	// Get existing timetable
 	timetable, err := c.timetableRepo.GetByID(uint(id))
 	if err != nil {
 		logger.Error("Failed to get timetable: %v", err)
@@ -187,7 +178,6 @@ func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 		return
 	}
 
-	// Update fields if provided
 	if req.ClassID != nil {
 		timetable.ClassID = *req.ClassID
 	}
@@ -213,8 +203,7 @@ func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 		timetable.EndTime = *req.EndTime
 	}
 
-	// Validate for conflicts
-	if err := c.timetableService.ValidateTimeSlot(timetable); err != nil {
+	if err := c.timetableService.ValidateTimeSlot(timetable, uint(id)); err != nil {
 		logger.Error("Timetable validation failed: %v", err)
 		ctx.JSON(http.StatusConflict, gin.H{"error": "Scheduling conflict detected", "details": err.Error()})
 		return
@@ -230,7 +219,6 @@ func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"message": "Timetable entry updated successfully", "timetable": timetable})
 }
 
-// DeleteTimetable deletes a timetable entry
 func (c *TimetableController) DeleteTimetable(ctx *gin.Context) {
 	idStr := ctx.Param("id")
 	id, err := strconv.ParseUint(idStr, 10, 32)
@@ -249,7 +237,6 @@ func (c *TimetableController) DeleteTimetable(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"message": "Timetable entry deleted successfully"})
 }
 
-// GenerateTimetable generates a complete timetable for a class
 func (c *TimetableController) GenerateTimetable(ctx *gin.Context) {
 	var req GenerateTimetableRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
@@ -258,23 +245,79 @@ func (c *TimetableController) GenerateTimetable(ctx *gin.Context) {
 		return
 	}
 
-	timetables, err := c.timetableService.GenerateTimetable(req.ClassID)
+	result, err := c.timetableService.GenerateTimetable(req.ClassID)
 	if err != nil {
 		logger.Error("Failed to generate timetable: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate timetable", "details": err.Error()})
+		status := http.StatusInternalServerError
+		body := gin.H{"error": "Failed to generate timetable", "details": err.Error()}
+		if result != nil {
+			body["status"] = result.Status
+			body["unsat_reasons"] = result.UnsatReasons
+			body["engine"] = result.Engine
+			body["required_sessions"] = result.RequiredSessions
+			body["scheduled_sessions"] = result.ScheduledSessions
+			if result.Status == "infeasible" || result.Status == "partial" {
+				status = http.StatusUnprocessableEntity
+			}
+		}
+		if strings.Contains(err.Error(), "infeasible") {
+			status = http.StatusUnprocessableEntity
+		}
+		ctx.JSON(status, body)
 		return
 	}
 
-	logger.Info("Timetable generated successfully for class ID %d: %d entries", req.ClassID, len(timetables))
+	logger.Info("Timetable generated for class %d: %d entries via %s", req.ClassID, len(result.Timetables), result.Engine)
 	ctx.JSON(http.StatusOK, gin.H{
-		"message": "Timetable generated successfully",
-		"timetables": timetables,
-		"count": len(timetables),
+		"message":                   "Timetable generated successfully (replaced previous class slots)",
+		"timetables":                result.Timetables,
+		"count":                     len(result.Timetables),
+		"status":                    result.Status,
+		"violated_soft_constraints": result.ViolatedSoftConstraints,
+		"engine":                    result.Engine,
+		"required_sessions":         result.RequiredSessions,
+		"scheduled_sessions":        result.ScheduledSessions,
 	})
 }
 
-// ValidateTimetable validates a timetable for conflicts
+func (c *TimetableController) PreviewGenerateTimetable(ctx *gin.Context) {
+	var req GenerateTimetableRequest
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
+		return
+	}
+
+	result, err := c.timetableService.PreviewTimetable(req.ClassID)
+	if err != nil {
+		logger.Error("Failed to preview timetable: %v", err)
+		status := http.StatusInternalServerError
+		body := gin.H{"error": "Failed to preview timetable", "details": err.Error()}
+		if result != nil {
+			body["status"] = result.Status
+			body["unsat_reasons"] = result.UnsatReasons
+			body["engine"] = result.Engine
+			body["required_sessions"] = result.RequiredSessions
+			body["scheduled_sessions"] = result.ScheduledSessions
+		}
+		if errors.Is(err, services.ErrInfeasible) || strings.Contains(err.Error(), "infeasible") {
+			status = http.StatusUnprocessableEntity
+		}
+		ctx.JSON(status, body)
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"message":                   "Timetable preview generated (not persisted; commit via POST /generate)",
+		"timetables":                result.Timetables,
+		"count":                     len(result.Timetables),
+		"status":                    result.Status,
+		"violated_soft_constraints": result.ViolatedSoftConstraints,
+		"engine":                    result.Engine,
+		"required_sessions":         result.RequiredSessions,
+		"scheduled_sessions":        result.ScheduledSessions,
+	})
+}
+
 func (c *TimetableController) ValidateTimetable(ctx *gin.Context) {
-	// You can extend this to validate multiple timetable entries or specific constraints
-	ctx.JSON(http.StatusOK, gin.H{"message": "Timetable validation endpoint - implement as needed"})
+	ctx.JSON(http.StatusOK, gin.H{"message": "Use POST create/update for slot validation; conflicts return 409"})
 }

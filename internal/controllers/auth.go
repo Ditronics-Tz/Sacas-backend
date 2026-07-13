@@ -4,9 +4,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 
 	"go_boilerplate/internal/config"
@@ -138,7 +138,13 @@ func (ac *AuthController) Login(c *gin.Context) {
 	user.LastLoginAt = &now
 	ac.userRepo.Update(user)
 
-	// Generate JWT token
+	secret, err := config.ResolveJWTSecret()
+	if err != nil {
+		logger.Error("JWT secret misconfigured: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Server auth configuration error"})
+		return
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id": user.ID,
 		"role":    string(user.Role),
@@ -147,7 +153,7 @@ func (ac *AuthController) Login(c *gin.Context) {
 		"iat":     time.Now().Unix(),
 	})
 
-	tokenString, err := token.SignedString([]byte(config.GetEnv("JWT_SECRET", "mysecretkey")))
+	tokenString, err := token.SignedString([]byte(secret))
 	if err != nil {
 		logger.Error("Failed to generate JWT token: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})

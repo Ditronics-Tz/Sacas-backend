@@ -10,13 +10,17 @@ type TimetableRepository interface {
 	GetByID(id uint) (*models.Timetable, error)
 	Update(timetable *models.Timetable) error
 	Delete(id uint) error
+	DeleteByClass(classID uint) error
+	ReplaceClassTimetable(classID uint, entries []models.Timetable) ([]models.Timetable, error)
 	GetAll(limit, offset int) ([]models.Timetable, error)
 	GetByClass(classID uint) ([]models.Timetable, error)
 	GetByStaff(staffID uint) ([]models.Timetable, error)
 	GetByRoom(roomID uint) ([]models.Timetable, error)
 	GetByDay(day models.Weekday) ([]models.Timetable, error)
-	CheckConflicts(classID, staffID, roomID uint, day models.Weekday, startTime, endTime string) ([]models.Timetable, error)
+	// CheckConflicts finds overlapping bookings. Pass excludeID > 0 to ignore a row (updates).
+	CheckConflicts(classID, staffID, roomID uint, day models.Weekday, startTime, endTime string, excludeID uint) ([]models.Timetable, error)
 	GetByDateRange(startDate, endDate string) ([]models.Timetable, error)
+	DB() *gorm.DB
 }
 
 type timetableRepository struct {
@@ -25,6 +29,10 @@ type timetableRepository struct {
 
 func NewTimetableRepository(db *gorm.DB) TimetableRepository {
 	return &timetableRepository{db: db}
+}
+
+func (r *timetableRepository) DB() *gorm.DB {
+	return r.db
 }
 
 func (r *timetableRepository) Create(timetable *models.Timetable) error {
@@ -46,6 +54,38 @@ func (r *timetableRepository) Update(timetable *models.Timetable) error {
 
 func (r *timetableRepository) Delete(id uint) error {
 	return r.db.Delete(&models.Timetable{}, id).Error
+}
+
+func (r *timetableRepository) DeleteByClass(classID uint) error {
+	// Hard-delete to avoid soft-delete tombstone growth on regenerate
+	return r.db.Unscoped().Where("class_id = ?", classID).Delete(&models.Timetable{}).Error
+}
+
+// ReplaceClassTimetable hard-deletes existing class slots and inserts new ones in one transaction.
+func (r *timetableRepository) ReplaceClassTimetable(classID uint, entries []models.Timetable) ([]models.Timetable, error) {
+	var out []models.Timetable
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		// Unscoped: permanent delete so regenerations do not accumulate tombstones
+		if err := tx.Unscoped().Where("class_id = ?", classID).Delete(&models.Timetable{}).Error; err != nil {
+			return err
+		}
+		for i := range entries {
+			entries[i].ID = 0
+			entries[i].ClassID = classID
+			if err := tx.Create(&entries[i]).Error; err != nil {
+				return err
+			}
+			var full models.Timetable
+			if err := tx.Preload("Class").Preload("Module").Preload("Subject").Preload("Staff").Preload("Room").
+				First(&full, entries[i].ID).Error; err != nil {
+				out = append(out, entries[i])
+			} else {
+				out = append(out, full)
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 func (r *timetableRepository) GetAll(limit, offset int) ([]models.Timetable, error) {
@@ -83,18 +123,18 @@ func (r *timetableRepository) GetByDay(day models.Weekday) ([]models.Timetable, 
 	return timetables, err
 }
 
-func (r *timetableRepository) CheckConflicts(classID, staffID, roomID uint, day models.Weekday, startTime, endTime string) ([]models.Timetable, error) {
+func (r *timetableRepository) CheckConflicts(classID, staffID, roomID uint, day models.Weekday, startTime, endTime string, excludeID uint) ([]models.Timetable, error) {
 	var conflicts []models.Timetable
-	
-	// Check for overlapping time slots for the same day
+
 	query := r.db.Where("day = ?", day).Where(
 		"(start_time < ? AND end_time > ?) OR (start_time < ? AND end_time > ?) OR (start_time >= ? AND end_time <= ?)",
 		endTime, startTime, startTime, endTime, startTime, endTime,
 	)
-	
-	// Check conflicts for class, staff, or room
 	query = query.Where("class_id = ? OR staff_id = ? OR room_id = ?", classID, staffID, roomID)
-	
+	if excludeID > 0 {
+		query = query.Where("id <> ?", excludeID)
+	}
+
 	err := query.Find(&conflicts).Error
 	return conflicts, err
 }

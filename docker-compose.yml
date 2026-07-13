@@ -1,0 +1,67 @@
+# Backend stack only: Postgres + Redis + Solver + API
+# Frontend lives in https://github.com/Ditronics-Tz/timetable_ui
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: SACAS
+    ports:
+      - "5432:5432"
+    volumes:
+      - sacas_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  solver:
+    build: ./solver-service
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      ENV: development
+      DATABASE_URL: host=postgres user=postgres password=postgres dbname=SACAS port=5432 sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ""
+      JWT_SECRET: local-compose-dev-secret-not-for-production-use
+      CSRF_ENABLED: "false"
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost
+      SOLVER_URL: http://solver:8090
+      SOLVER_TIMEOUT_SECONDS: "35"
+      SOLVER_FALLBACK: "false"
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_REQUESTS_PER_MINUTE: "120"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      solver:
+        condition: service_started
+
+volumes:
+  sacas_pg:

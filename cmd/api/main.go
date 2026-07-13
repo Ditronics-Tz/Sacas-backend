@@ -18,10 +18,10 @@ import (
 func main() {
 	var err error
 
-	// Load environment variables
+	// Load environment variables (optional when running under Docker/K8s with real env)
 	err = godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Println("No .env file found — using process environment")
 	}
 
 	// Initialize logger
@@ -51,6 +51,30 @@ func main() {
 	// Set Gin mode based on environment
 	if config.GetEnv("ENV", "development") == "production" {
 		gin.SetMode(gin.ReleaseMode)
+	}
+
+	// Fail fast on weak JWT secrets in production
+	jwtSecret, err := config.ResolveJWTSecret()
+	if err != nil {
+		logger.Fatal("JWT configuration error: %v", err)
+	}
+	if config.IsWeakJWTSecret(jwtSecret) {
+		logger.Warn("JWT_SECRET is a weak/dev default — do not use in production")
+	}
+
+	// CSRF posture is applied inside SetupRoutes; log here for visibility at boot
+	csrfState := config.GetEnv("CSRF_ENABLED", "false")
+	if csrfState == "true" {
+		logger.Info("CSRF_ENABLED=true — mutating requests require X-CSRF-Token (Redis-backed)")
+	} else {
+		logger.Info("CSRF_ENABLED=false — CSRF checks disabled (SPA dev mode)")
+	}
+	logger.Info("CORS_ALLOWED_ORIGINS=%s", config.GetEnv("CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"))
+	solverURL := config.GetEnv("SOLVER_URL", "")
+	if solverURL == "" {
+		logger.Info("SOLVER_URL=(empty) — greedy engine only")
+	} else {
+		logger.Info("SOLVER_URL=%s SOLVER_FALLBACK=%s", solverURL, config.GetEnv("SOLVER_FALLBACK", "false"))
 	}
 
 	router := gin.Default()
@@ -83,8 +107,9 @@ func main() {
 	logger.Info("  - POST /api/protected/timetable/staff")
 	logger.Info("  - GET  /api/protected/timetable/staff")
 	logger.Info("  - POST /api/protected/timetable/generate")
+	logger.Info("  - POST /api/protected/timetable/generate/preview")
 	logger.Info("  - GET  /api/protected/timetable/class/:class_id")
-	logger.Info("  - GET  /api/protected/timetable/staff/:staff_id")
+	logger.Info("  - GET  /api/protected/timetable/by-staff/:staff_id")
 
 	err = router.Run(":" + port)
 	if err != nil {

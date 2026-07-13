@@ -1,23 +1,34 @@
 package middlewares
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/dgrijalva/jwt-go"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 
 	"go_boilerplate/internal/config"
 	"go_boilerplate/internal/models"
 	"go_boilerplate/pkg/logger"
 )
 
+func jwtSecret() []byte {
+	secret, err := config.ResolveJWTSecret()
+	if err != nil {
+		// Should not reach here if main validated production secret;
+		// fall back to empty which fails signature validation.
+		logger.Error("JWT secret resolution failed: %v", err)
+		return []byte{}
+	}
+	return []byte(secret)
+}
+
 func JWTAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var tokenString string
 
-		// Try to get token from Authorization header first
 		authHeader := c.GetHeader("Authorization")
 		if authHeader != "" {
 			bearerToken := strings.Split(authHeader, " ")
@@ -26,7 +37,6 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 			}
 		}
 
-		// If no authorization header, try to get token from cookie
 		if tokenString == "" {
 			var err error
 			tokenString, err = c.Cookie("token")
@@ -39,11 +49,10 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 		}
 
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Validate signing method
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, jwt.NewValidationError("Invalid signing method", jwt.ValidationErrorSignatureInvalid)
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
-			return []byte(config.GetEnv("JWT_SECRET", "mysecretkey")), nil
+			return jwtSecret(), nil
 		})
 
 		if err != nil || !token.Valid {
@@ -61,9 +70,15 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		// Check token expiration
 		if exp, ok := claims["exp"]; ok {
-			if expTime := int64(exp.(float64)); expTime < time.Now().Unix() {
+			var expTime int64
+			switch v := exp.(type) {
+			case float64:
+				expTime = int64(v)
+			case int64:
+				expTime = v
+			}
+			if expTime > 0 && expTime < time.Now().Unix() {
 				logger.Warn("Token expired")
 				c.JSON(http.StatusUnauthorized, gin.H{"error": "Token expired"})
 				c.Abort()
@@ -89,8 +104,6 @@ func RoleMiddleware(roles ...string) gin.HandlerFunc {
 		}
 
 		userRole := role.(string)
-		
-		// Check if user has any of the required roles
 		for _, r := range roles {
 			if userRole == r {
 				c.Next()
@@ -104,21 +117,62 @@ func RoleMiddleware(roles ...string) gin.HandlerFunc {
 	}
 }
 
-// AdminMiddleware allows access to admin and super admin roles
 func AdminMiddleware() gin.HandlerFunc {
 	return RoleMiddleware(string(models.RoleAdmin), string(models.RoleSuperAdmin))
 }
 
-// SuperAdminMiddleware allows access only to super admin role
 func SuperAdminMiddleware() gin.HandlerFunc {
 	return RoleMiddleware(string(models.RoleSuperAdmin))
 }
 
-// ActiveUserMiddleware ensures the user is active (can be combined with other middleware)
-func ActiveUserMiddleware() gin.HandlerFunc {
+// ActiveUserLookup looks up a user by ID for active checks.
+type ActiveUserLookup func(id uint) (*models.User, error)
+
+// ActiveUserMiddleware rejects deactivated users even if JWT is still valid.
+func ActiveUserMiddleware(lookup ActiveUserLookup) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// This would require a database lookup, so we'll implement it differently
-		// For now, we assume active status is checked during login
+		if lookup == nil {
+			c.Next()
+			return
+		}
+		raw, exists := c.Get("user_id")
+		if !exists {
+			c.Next()
+			return
+		}
+		var id uint
+		switch v := raw.(type) {
+		case float64:
+			id = uint(v)
+		case int:
+			id = uint(v)
+		case uint:
+			id = v
+		case int64:
+			id = uint(v)
+		default:
+			// try parse via fmt
+			var n uint64
+			_, err := fmt.Sscanf(fmt.Sprint(v), "%d", &n)
+			if err != nil {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user in token"})
+				c.Abort()
+				return
+			}
+			id = uint(n)
+		}
+
+		user, err := lookup(id)
+		if err != nil || user == nil {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
+			c.Abort()
+			return
+		}
+		if !user.IsActive {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Account is not active"})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }

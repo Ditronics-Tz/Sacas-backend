@@ -42,6 +42,15 @@ go.work.sum
 # Build artifacts
 dist/
 build/
+bin/
+*.exe
+api.exe
+
+# Python solver
+solver-service/**/__pycache__/
+solver-service/**/.pytest_cache/
+solver-service/.venv/
+solver-service/venv/
 
 # Database files
 *.db

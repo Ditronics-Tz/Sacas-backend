@@ -13,7 +13,10 @@ type Faculty struct {
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 	Name        string         `gorm:"not null" json:"name" validate:"required,min=2,max=100"`
 	Description string         `json:"description"`
-	
+	HodName     string         `json:"hod_name"`
+	HodPhone    string         `json:"hod_phone"`
+	HodEmail    string         `json:"hod_email"`
+
 	// Relationships
 	Courses []Course `json:"courses,omitempty"`
 	Staff   []Staff  `json:"staff,omitempty"`

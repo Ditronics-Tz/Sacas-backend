@@ -25,11 +25,14 @@ type Module struct {
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
 	Name         string         `gorm:"not null" json:"name" validate:"required,min=2,max=100"`
+	Code         string         `json:"code"`
 	CourseID     *uint          `json:"course_id"` // Nullable for general subjects
 	CreditHours  int            `gorm:"not null" json:"credit_hours" validate:"required,min=1,max=10"`
 	Type         ModuleType     `gorm:"not null" json:"type" validate:"required"`
 	RequiresLab  bool           `gorm:"default:false" json:"requires_lab"`
-	
+	Semester     *int           `json:"semester"`
+	NtaLevel     string         `json:"nta_level"`
+
 	// Relationships
 	Course     *Course     `gorm:"foreignKey:CourseID" json:"course,omitempty"`
 	Staff      []Staff     `gorm:"many2many:staff_modules;" json:"staff,omitempty"`

@@ -7,24 +7,28 @@ import (
 	"gorm.io/gorm"
 )
 
+// SeedDB is a legacy helper. Prefer CreateInitialData used by main.
+// Role aligned to super_admin (not invalid "admin") so it does not conflict
+// with CreateInitialData's seed. Same credentials: admin@example.com / password.
 func SeedDB(db *gorm.DB) {
-	// Auto Migrate
 	err := db.AutoMigrate(&models.User{})
 	if err != nil {
 		log.Fatalf("Failed to auto migrate: %v", err)
 	}
 
-	// Seed default admin user
 	adminUser := models.User{
-		Email:    "admin@example.com",
-		Password: "$2a$10$3XvXBA2lX5bXwI1H0kxrN.vp4R.X1I7Mo7S3d62M9U7Zc3Y6q5VKa", // bcrypt hash for 'admin123'
-		Role:     "admin",
-		IsActive: true,
+		Email:      "admin@example.com",
+		Password:   "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", // password
+		FirstName:  "Super",
+		LastName:   "Admin",
+		Role:       models.RoleSuperAdmin,
+		IsActive:   true,
+		IsVerified: true,
 	}
 
 	if err := db.FirstOrCreate(&adminUser, models.User{Email: adminUser.Email}).Error; err != nil {
 		log.Printf("Failed to seed admin user: %v", err)
 	} else {
-		log.Println("Admin user seeded successfully")
+		log.Println("Admin user seeded successfully (super_admin)")
 	}
 }

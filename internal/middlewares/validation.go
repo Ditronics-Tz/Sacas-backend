@@ -51,7 +51,8 @@ type SecurityConfig struct {
 
 func DefaultSecurityConfig() SecurityConfig {
 	return SecurityConfig{
-		EnableSQLInjectionProtection:  true,
+		// GORM uses parameterized queries; keyword scanning false-positives on benign input.
+		EnableSQLInjectionProtection:  false,
 		EnableXSSProtection:           true,
 		EnablePathTraversalProtection: true,
 		MaxRequestSize:                10 * 1024 * 1024, // 10MB

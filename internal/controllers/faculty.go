@@ -23,11 +23,17 @@ func NewFacultyController(facultyRepo repositories.FacultyRepository) *FacultyCo
 type CreateFacultyRequest struct {
 	Name        string `json:"name" binding:"required,min=2,max=100"`
 	Description string `json:"description,omitempty"`
+	HodName     string `json:"hod_name,omitempty"`
+	HodPhone    string `json:"hod_phone,omitempty"`
+	HodEmail    string `json:"hod_email,omitempty"`
 }
 
 type UpdateFacultyRequest struct {
 	Name        *string `json:"name,omitempty" binding:"omitempty,min=2,max=100"`
 	Description *string `json:"description,omitempty"`
+	HodName     *string `json:"hod_name,omitempty"`
+	HodPhone    *string `json:"hod_phone,omitempty"`
+	HodEmail    *string `json:"hod_email,omitempty"`
 }
 
 func (c *FacultyController) CreateFaculty(ctx *gin.Context) {
@@ -40,6 +46,9 @@ func (c *FacultyController) CreateFaculty(ctx *gin.Context) {
 	faculty := &models.Faculty{
 		Name:        req.Name,
 		Description: req.Description,
+		HodName:     req.HodName,
+		HodPhone:    req.HodPhone,
+		HodEmail:    req.HodEmail,
 	}
 
 	if err := c.facultyRepo.Create(faculty); err != nil {
@@ -71,6 +80,12 @@ func (c *FacultyController) GetFaculty(ctx *gin.Context) {
 func (c *FacultyController) GetAllFaculties(ctx *gin.Context) {
 	limit, _ := strconv.Atoi(ctx.DefaultQuery("limit", "10"))
 	offset, _ := strconv.Atoi(ctx.DefaultQuery("offset", "0"))
+	if limit <= 0 {
+		limit = 10
+	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	faculties, err := c.facultyRepo.GetAll(limit, offset)
 	if err != nil {
@@ -107,6 +122,15 @@ func (c *FacultyController) UpdateFaculty(ctx *gin.Context) {
 	}
 	if req.Description != nil {
 		faculty.Description = *req.Description
+	}
+	if req.HodName != nil {
+		faculty.HodName = *req.HodName
+	}
+	if req.HodPhone != nil {
+		faculty.HodPhone = *req.HodPhone
+	}
+	if req.HodEmail != nil {
+		faculty.HodEmail = *req.HodEmail
 	}
 
 	if err := c.facultyRepo.Update(faculty); err != nil {
