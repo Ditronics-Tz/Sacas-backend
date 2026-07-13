@@ -65,30 +65,27 @@ Quick check:
 Test-NetConnection localhost -Port 6379
 ```
 
-### 4. Configure and run the API
+### 4. Configure and run the API (dev server)
 
 ```powershell
 cd path\to\Sacas-backend
 
-# Create .env (edit password if your Postgres is not "postgres")
+# Create .env once (edit password if needed)
 copy .env.example .env
-notepad .env
 
-# Easiest: helper script
-.\run.ps1
-
-# Or pure Go commands:
-go mod tidy
-go run ./cmd/api
+# >>> THIS IS THE DEV SERVER <<<
+go run .
 ```
 
-If PowerShell blocks scripts:
+Also works:
 
 ```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-# or:
-powershell -ExecutionPolicy Bypass -File .\run.ps1
+go run ./cmd/api
+.\run.ps1
 ```
+
+Leave the terminal open. Stop with **Ctrl+C**.  
+Usage guide (login, sample calls): **[HOW_TO_USE.md](./HOW_TO_USE.md)**
 
 ### 5. Verify
 
@@ -111,15 +108,14 @@ Invoke-RestMethod -Method POST -Uri http://localhost:8080/api/auth/login `
 ### Useful Go commands
 
 ```powershell
-go mod tidy              # download deps
-go run ./cmd/api         # start server
-go test ./...            # unit tests
-go vet ./...             # static checks
-go build -o bin\api.exe ./cmd/api   # produce binary
-.\bin\api.exe            # run binary (needs .env in cwd)
-
-# or
-.\test.ps1               # test + vet + build
+go mod tidy                 # download deps
+go run .                    # start DEV server  <<< use this
+go run ./cmd/api            # same server (alt path)
+go test ./...               # unit tests
+go vet ./...                # static checks
+go build -o bin\api.exe .   # produce binary
+.\bin\api.exe               # run binary (needs .env in cwd)
+.\test.ps1                  # test + vet + build
 ```
 
 ### Solver (optional — skip for easier testing)

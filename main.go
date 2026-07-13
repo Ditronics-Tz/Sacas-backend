@@ -1,5 +1,13 @@
-// Alternative entry (same server as root `go run .`).
-// Docker / tools that expect ./cmd/api can keep using this path.
+// SACAS API entrypoint.
+//
+// Dev server (from this folder):
+//
+//	go run .
+//	go run ./cmd/api
+//
+// Build:
+//
+//	go build -o bin/api.exe .
 package main
 
 import (

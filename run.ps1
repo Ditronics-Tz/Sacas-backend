@@ -33,10 +33,11 @@ if (-not $SkipTidy) {
     go mod tidy
 }
 
-Write-Host "Starting API: go run ./cmd/api" -ForegroundColor Green
+Write-Host "Starting DEV server: go run ." -ForegroundColor Green
 Write-Host "  Health: http://localhost:8080/api/health"
 Write-Host "  Admin:  admin@example.com / password"
-Write-Host "  Tip: leave SOLVER_URL empty in .env to use built-in greedy scheduler (no Python)." -ForegroundColor DarkGray
+Write-Host "  Guide:  see HOW_TO_USE.md"
+Write-Host "  Tip: leave SOLVER_URL empty in .env (no Python solver needed)." -ForegroundColor DarkGray
 Write-Host ""
 
-go run ./cmd/api
+go run .

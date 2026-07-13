@@ -12,8 +12,8 @@ Write-Host "go vet ./..." -ForegroundColor Cyan
 go vet ./...
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "go build ./cmd/api" -ForegroundColor Cyan
-go build -o bin\api.exe ./cmd/api
+Write-Host "go build ." -ForegroundColor Cyan
+go build -o bin\api.exe .
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "OK — tests, vet, and build passed." -ForegroundColor Green
