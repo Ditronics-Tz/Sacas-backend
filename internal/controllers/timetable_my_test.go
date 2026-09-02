@@ -41,6 +41,7 @@ func (r *stubTimetableRepo) CheckConflicts(classID, staffID, roomID uint, day mo
 func (r *stubTimetableRepo) GetByDateRange(startDate, endDate string) ([]models.Timetable, error) {
 	return nil, nil
 }
+func (r *stubTimetableRepo) GetByCourse(courseID uint) ([]models.Timetable, error) { return nil, nil }
 func (r *stubTimetableRepo) DB() *gorm.DB { return nil }
 
 // staffRepoWithUser is a minimal StaffRepository stub returning a linked staff.

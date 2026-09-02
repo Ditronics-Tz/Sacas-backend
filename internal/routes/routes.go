@@ -341,6 +341,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				timetable.POST("/generate/preview", timetableController.PreviewGenerateTimetable)
 				timetable.GET("/class/:class_id", timetableController.GetTimetableByClass)
 				timetable.GET("/by-staff/:staff_id", timetableController.GetTimetableByStaff)
+				timetable.GET("/by-course/:course_id", timetableController.GetTimetableByCourse)
 				timetable.GET("/validate", timetableController.ValidateTimetable)
 				timetable.POST("/", timetableController.CreateTimetable)
 				timetable.GET("/:id", timetableController.GetTimetable)

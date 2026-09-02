@@ -15,6 +15,10 @@ type TimetableRepository interface {
 	GetAll(limit, offset int) ([]models.Timetable, error)
 	GetByClass(classID uint) ([]models.Timetable, error)
 	GetByStaff(staffID uint) ([]models.Timetable, error)
+	// GetByCourse returns timetable entries for all classes belonging to a
+	// course (course → classes → timetable entries) in a single query.
+	// A course with no classes/entries yields an empty (non-nil) slice.
+	GetByCourse(courseID uint) ([]models.Timetable, error)
 	GetByRoom(roomID uint) ([]models.Timetable, error)
 	GetByDay(day models.Weekday) ([]models.Timetable, error)
 	// CheckConflicts finds overlapping bookings. Pass excludeID > 0 to ignore a row (updates).
@@ -106,6 +110,24 @@ func (r *timetableRepository) GetByStaff(staffID uint) ([]models.Timetable, erro
 	var timetables []models.Timetable
 	err := r.db.Preload("Class").Preload("Module").Preload("Subject").Preload("Staff").Preload("Room").
 		Where("staff_id = ?", staffID).Find(&timetables).Error
+	return timetables, err
+}
+
+func (r *timetableRepository) GetByCourse(courseID uint) ([]models.Timetable, error) {
+	// Join through classes via a subquery (house style — no raw JOINs):
+	// timetables WHERE class_id IN (SELECT id FROM classes WHERE course_id = ?).
+	classesSubQuery := r.db.Model(&models.Class{}).
+		Select("id").
+		Where("course_id = ?", courseID)
+
+	var timetables []models.Timetable
+	err := r.db.Preload("Class").Preload("Module").Preload("Subject").Preload("Staff").Preload("Room").
+		Where("class_id IN (?)", classesSubQuery).Find(&timetables).Error
+	if timetables == nil {
+		// Course with no classes/entries is an empty result, not an error;
+		// return [] so JSON marshals as [] rather than null.
+		timetables = []models.Timetable{}
+	}
 	return timetables, err
 }
 

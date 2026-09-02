@@ -160,6 +160,28 @@ func (c *TimetableController) GetTimetableByStaff(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"timetables": timetables})
 }
 
+// GetTimetableByCourse handles GET /by-course/:course_id — aggregates
+// timetable entries for all classes belonging to a course.
+// A course with no classes (or no entries) returns 200 with an empty array,
+// not 404 — that is a legitimate state, not an error.
+func (c *TimetableController) GetTimetableByCourse(ctx *gin.Context) {
+	courseIDStr := ctx.Param("course_id")
+	courseID, err := strconv.ParseUint(courseIDStr, 10, 32)
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid course ID"})
+		return
+	}
+
+	timetables, err := c.timetableRepo.GetByCourse(uint(courseID))
+	if err != nil {
+		logger.Error("Failed to get timetable for course: %v", err)
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get timetable"})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"timetables": timetables})
+}
+
 // GetMyTimetable handles GET /protected/timetable/my.
 //
 // Security invariants:

@@ -319,6 +319,7 @@ List endpoints accept: `?limit=10&offset=0`.
 | DELETE | `/:id` | |
 | GET | `/class/:class_id` | entries for class |
 | GET | `/by-staff/:staff_id` | entries for staff (**not** `/staff/:id` — avoids CRUD clash) |
+| GET | `/by-course/:course_id` | entries for all classes in a course (`[]` if none) |
 | GET | `/validate` | stub message |
 
 **Generate response**
