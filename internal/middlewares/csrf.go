@@ -2,7 +2,6 @@ package middlewares
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
 	"time"
@@ -11,6 +10,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"go_boilerplate/pkg/logger"
+	"go_boilerplate/pkg/security"
 )
 
 const (
@@ -58,13 +58,6 @@ var errCSRFStoreUnavailable = &csrfStoreError{}
 type csrfStoreError struct{}
 
 func (e *csrfStoreError) Error() string { return "CSRF store unavailable" }
-
-func secureEqual(a, b string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
-}
 
 // CSRFMiddleware provides CSRF protection for SPAs:
 // - Issues token on safe methods via header X-CSRF-Token and non-HttpOnly cookie
@@ -115,7 +108,7 @@ func CSRFMiddleware(config CSRFConfig) gin.HandlerFunc {
 
 		// Double-submit: if browser sent csrf cookie, header must match it
 		if cookieToken, err := c.Cookie(CSRFCookieName); err == nil && cookieToken != "" {
-			if !secureEqual(headerToken, cookieToken) {
+			if !security.SecureCompare(headerToken, cookieToken) {
 				logger.Warn("CSRF header/cookie mismatch for %s %s", c.Request.Method, c.Request.URL.Path)
 				c.JSON(http.StatusForbidden, gin.H{"error": "CSRF token mismatch"})
 				c.Abort()

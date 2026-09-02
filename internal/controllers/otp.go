@@ -8,17 +8,20 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"go_boilerplate/internal/services"
+	"go_boilerplate/pkg/security"
 )
 
 type OTPController struct {
 	NotificationService *services.NotificationService
 	RedisClient         *redis.Client
+	otpGuard            *services.OTPAttemptGuard
 }
 
-func NewOTPController(notificationService *services.NotificationService, redisClient *redis.Client) *OTPController {
+func NewOTPController(notificationService *services.NotificationService, redisClient *redis.Client, otpGuard *services.OTPAttemptGuard) *OTPController {
 	return &OTPController{
 		NotificationService: notificationService,
 		RedisClient:         redisClient,
+		otpGuard:            otpGuard,
 	}
 }
 
@@ -27,6 +30,8 @@ type OTPRequest struct {
 	Phone string `json:"phone"`
 }
 
+// SendOTP sends a generic OTP. Note: the OTP value is never logged (see
+// auth.go devOTPLogging) — it is only delivered via email/SMS.
 func (oc *OTPController) SendOTP(c *gin.Context) {
 	var req OTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -67,6 +72,7 @@ type VerifyOTPRequest struct {
 }
 
 func (oc *OTPController) VerifyOTP(c *gin.Context) {
+	const purpose = "otp"
 	var req VerifyOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -75,6 +81,13 @@ func (oc *OTPController) VerifyOTP(c *gin.Context) {
 
 	if oc.RedisClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis)"})
+		return
+	}
+
+	// Per-account brute-force lockout (see AuthController.VerifyEmail).
+	if oc.otpGuard.AttemptsExceeded(c, purpose, req.Email) {
+		oc.RedisClient.Del(c, "otp:"+req.Email)
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many failed attempts. Request a new OTP."})
 		return
 	}
 
@@ -87,16 +100,19 @@ func (oc *OTPController) VerifyOTP(c *gin.Context) {
 		return
 	}
 
-	if storedOTP != req.OTP {
+	if !security.SecureCompare(storedOTP, req.OTP) {
+		ttl := services.RemainingTTL(c, oc.RedisClient, "otp:"+req.Email, 5*time.Minute)
+		oc.otpGuard.RecordFailure(c, purpose, req.Email, ttl)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OTP"})
 		return
 	}
 
-	// OTP verified, delete it from Redis
+	// OTP verified, delete it (and the attempt counter) from Redis
 	if err := oc.RedisClient.Del(c, "otp:"+req.Email).Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete OTP"})
 		return
 	}
+	oc.otpGuard.Reset(c, purpose, req.Email)
 
 	c.JSON(http.StatusOK, gin.H{"message": "OTP verified successfully"})
 }

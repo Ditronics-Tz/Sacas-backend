@@ -113,6 +113,23 @@ Times are strings `"HH:MM"` (e.g. `"08:00"`, `"09:00"`).
 - `POST /api/auth/login` with `{ email, password }`
 - Rejects if inactive
 - Returns JWT (24h) + user object; sets cookie `token`
+- **Token duplication is deliberate:** the httpOnly cookie serves browser/SPA
+  clients; the `token` body field serves native/mobile clients that cannot use
+  cookie jars. Set `AUTH_RETURN_TOKEN_IN_BODY=false` (default `true`) for
+  purely SPA deployments to omit the body token.
+
+### OTP handling
+
+- Stored in Redis: `verify:{email}` / `reset:{email}` (15 min), `otp:{email}` (5 min)
+- **Never logged in production** (`ENV=production`); dev environments log the
+  value at Info level for convenience
+- **Per-account attempt lockout:** failed verifications are counted per
+  purpose+email (`otp_attempts:{purpose}:{email}`); after `OTP_MAX_ATTEMPTS`
+  (default 5) the OTP is deleted and attempts return 429 until a new code is
+  requested. Counter TTL matches the OTP TTL; cleared on success
+- OTP comparisons use constant-time comparison (`pkg/security.SecureCompare`)
+- Passwords require ≥8 chars with upper, lower, and digit (custom Gin
+  validator `strongpassword` in `internal/controllers/auth.go`)
 
 ### JWT claims
 

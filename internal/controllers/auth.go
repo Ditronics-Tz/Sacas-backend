@@ -2,9 +2,12 @@ package controllers
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
+	"github.com/go-playground/validator/v10"
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -14,6 +17,7 @@ import (
 	"go_boilerplate/internal/repositories"
 	"go_boilerplate/internal/services"
 	"go_boilerplate/pkg/logger"
+	"go_boilerplate/pkg/security"
 	"gorm.io/gorm"
 )
 
@@ -21,29 +25,85 @@ type AuthController struct {
 	userRepo            repositories.UserRepository
 	notificationService *services.NotificationService
 	redisClient         *redis.Client
+	otpGuard            *services.OTPAttemptGuard
 }
 
-func NewAuthController(userRepo repositories.UserRepository, notificationService *services.NotificationService, redisClient *redis.Client) *AuthController {
+func NewAuthController(userRepo repositories.UserRepository, notificationService *services.NotificationService, redisClient *redis.Client, otpGuard *services.OTPAttemptGuard) *AuthController {
 	return &AuthController{
 		userRepo:            userRepo,
 		notificationService: notificationService,
 		redisClient:         redisClient,
+		otpGuard:            otpGuard,
+	}
+}
+
+// devOTPLogging reports whether OTP values may appear in logs. OTP values are
+// NEVER logged in production, at any level, because logs may be shipped to
+// third-party aggregation services.
+func devOTPLogging() bool {
+	return config.GetEnv("ENV", "development") != "production"
+}
+
+// --- Password policy (shared by RegisterRequest and ResetPasswordRequest) ---
+
+const minPasswordLength = 8
+
+// validPassword enforces: min 8 chars, at least one uppercase, one lowercase,
+// one digit. Special characters are deliberately not required.
+func validPassword(pw string) bool {
+	if len(pw) < minPasswordLength {
+		return false
+	}
+	var hasUpper, hasLower, hasDigit bool
+	for _, r := range pw {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			hasUpper = true
+		case r >= 'a' && r <= 'z':
+			hasLower = true
+		case r >= '0' && r <= '9':
+			hasDigit = true
+		}
+	}
+	return hasUpper && hasLower && hasDigit
+}
+
+const passwordPolicyMessage = "Password must be at least 8 characters and contain at least one uppercase letter, one lowercase letter, and one digit"
+
+// strongPassword is the Gin validator registered as "strongpassword".
+func strongPassword(fl validator.FieldLevel) bool {
+	return validPassword(fl.Field().String())
+}
+
+func init() {
+	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
+		_ = v.RegisterValidation("strongpassword", strongPassword)
 	}
 }
 
 type RegisterRequest struct {
-	Email       string          `json:"email" binding:"required,email"`
-	Password    string          `json:"password" binding:"required,min=6"`
-	FirstName   string          `json:"first_name" binding:"required,min=2,max=50"`
-	LastName    string          `json:"last_name" binding:"required,min=2,max=50"`
-	PhoneNumber string          `json:"phone_number,omitempty"`
+	Email       string `json:"email" binding:"required,email"`
+	Password    string `json:"password" binding:"required,min=8,strongpassword"`
+	FirstName   string `json:"first_name" binding:"required,min=2,max=50"`
+	LastName    string `json:"last_name" binding:"required,min=2,max=50"`
+	PhoneNumber string `json:"phone_number,omitempty"`
 }
 
 func (ac *AuthController) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Warn("Invalid registration request: %v", err)
+		// The generic binding error is cryptic for password rules; return a
+		// clear, policy-specific message when the password field is at fault.
+		if strings.Contains(err.Error(), "Password") || strings.Contains(err.Error(), "password") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": passwordPolicyMessage})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validPassword(req.Password) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": passwordPolicyMessage})
 		return
 	}
 
@@ -82,11 +142,17 @@ func (ac *AuthController) Register(c *gin.Context) {
 	// Send verification OTP (requires Redis)
 	otp := services.GenerateOTP(6)
 	if ac.redisClient == nil {
-		logger.Warn("Redis unavailable — cannot store verification OTP for %s (dev OTP: %s)", req.Email, otp)
+		if devOTPLogging() {
+			logger.Warn("Redis unavailable — cannot store verification OTP for %s (dev OTP: %s)", req.Email, otp)
+		} else {
+			logger.Warn("Redis unavailable — cannot store verification OTP for %s", req.Email)
+		}
 	} else if err := ac.redisClient.Set(c, "verify:"+req.Email, otp, 15*time.Minute).Err(); err != nil {
 		logger.Error("Failed to store verification OTP: %v", err)
 	} else {
-		logger.Info("DEV verification OTP for %s: %s", req.Email, otp)
+		if devOTPLogging() {
+			logger.Info("DEV verification OTP for %s: %s", req.Email, otp)
+		}
 		if err := ac.notificationService.SendEmailOTP(req.Email, otp); err != nil {
 			logger.Error("Failed to send verification email: %v", err)
 		}
@@ -168,9 +234,17 @@ func (ac *AuthController) Login(c *gin.Context) {
 	c.SetCookie("token", tokenString, 24*3600, "/", "", secure, true)
 
 	logger.Info("User logged in successfully: %s (ID: %d)", user.Email, user.ID)
-	c.JSON(http.StatusOK, gin.H{
+
+	// Token delivery is deliberately dual-channel:
+	//   - Browser/SPA clients authenticate via the httpOnly "token" cookie set
+	//     above (immune to XSS token theft from JS storage).
+	//   - Native/mobile clients cannot rely on browser cookie jars, so they use
+	//     the bearer token from the response body ("token" field).
+	// This duplication is intentional — do not remove either channel. Purely
+	// SPA deployments can reduce token exposure by setting
+	// AUTH_RETURN_TOKEN_IN_BODY=false, which omits the body token.
+	response := gin.H{
 		"message": "Login successful",
-		"token":   tokenString,
 		"user": gin.H{
 			"id":         user.ID,
 			"email":      user.Email,
@@ -179,7 +253,11 @@ func (ac *AuthController) Login(c *gin.Context) {
 			"role":       user.Role,
 			"is_active":  user.IsActive,
 		},
-	})
+	}
+	if config.GetEnv("AUTH_RETURN_TOKEN_IN_BODY", "true") == "true" {
+		response["token"] = tokenString
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // VerifyEmailRequest represents the request for email verification
@@ -190,6 +268,7 @@ type VerifyEmailRequest struct {
 
 // VerifyEmail verifies user's email address with OTP
 func (ac *AuthController) VerifyEmail(c *gin.Context) {
+	const purpose = "verify"
 	var req VerifyEmailRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -198,6 +277,16 @@ func (ac *AuthController) VerifyEmail(c *gin.Context) {
 
 	if ac.redisClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis for email verification)"})
+		return
+	}
+
+	// Per-account brute-force lockout: stop attempts against this email
+	// before touching the stored OTP. A locked-out OTP is deleted so a fresh
+	// one must be requested.
+	if ac.otpGuard.AttemptsExceeded(c, purpose, req.Email) {
+		ac.redisClient.Del(c, "verify:"+req.Email)
+		logger.Warn("OTP attempt lockout for email: %s", req.Email)
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many failed attempts. Request a new verification code."})
 		return
 	}
 
@@ -212,8 +301,10 @@ func (ac *AuthController) VerifyEmail(c *gin.Context) {
 		return
 	}
 
-	if storedOTP != req.OTP {
+	if !security.SecureCompare(storedOTP, req.OTP) {
 		logger.Warn("Invalid verification OTP for email: %s", req.Email)
+		ttl := services.RemainingTTL(c, ac.redisClient, "verify:"+req.Email, 15*time.Minute)
+		ac.otpGuard.RecordFailure(c, purpose, req.Email, ttl)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OTP"})
 		return
 	}
@@ -236,6 +327,7 @@ func (ac *AuthController) VerifyEmail(c *gin.Context) {
 
 	// Delete OTP from Redis
 	ac.redisClient.Del(c, "verify:"+req.Email)
+	ac.otpGuard.Reset(c, "verify", req.Email)
 
 	logger.Info("Email verified successfully for user: %s", req.Email)
 	c.JSON(http.StatusOK, gin.H{"message": "Email verified successfully"})
@@ -295,19 +387,37 @@ func (ac *AuthController) ForgotPassword(c *gin.Context) {
 type ResetPasswordRequest struct {
 	Email       string `json:"email" binding:"required,email"`
 	OTP         string `json:"otp" binding:"required,len=6"`
-	NewPassword string `json:"new_password" binding:"required,min=6"`
+	NewPassword string `json:"new_password" binding:"required,min=8,strongpassword"`
 }
 
 // ResetPassword resets user password with OTP
 func (ac *AuthController) ResetPassword(c *gin.Context) {
+	const purpose = "reset"
 	var req ResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		// Clear policy message when the new password fails the rules.
+		if strings.Contains(err.Error(), "NewPassword") || strings.Contains(err.Error(), "new_password") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": passwordPolicyMessage})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !validPassword(req.NewPassword) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": passwordPolicyMessage})
 		return
 	}
 
 	if ac.redisClient == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "OTP store unavailable (start Redis for password reset)"})
+		return
+	}
+
+	// Per-account brute-force lockout (see VerifyEmail).
+	if ac.otpGuard.AttemptsExceeded(c, purpose, req.Email) {
+		ac.redisClient.Del(c, "reset:"+req.Email)
+		logger.Warn("OTP attempt lockout for password reset: %s", req.Email)
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many failed attempts. Request a new reset code."})
 		return
 	}
 
@@ -322,8 +432,10 @@ func (ac *AuthController) ResetPassword(c *gin.Context) {
 		return
 	}
 
-	if storedOTP != req.OTP {
+	if !security.SecureCompare(storedOTP, req.OTP) {
 		logger.Warn("Invalid password reset OTP for email: %s", req.Email)
+		ttl := services.RemainingTTL(c, ac.redisClient, "reset:"+req.Email, 15*time.Minute)
+		ac.otpGuard.RecordFailure(c, purpose, req.Email, ttl)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid OTP"})
 		return
 	}
@@ -353,6 +465,7 @@ func (ac *AuthController) ResetPassword(c *gin.Context) {
 
 	// Delete OTP from Redis
 	ac.redisClient.Del(c, "reset:"+req.Email)
+	ac.otpGuard.Reset(c, "reset", req.Email)
 
 	logger.Info("Password reset successfully for user: %s", req.Email)
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully"})
@@ -360,9 +473,12 @@ func (ac *AuthController) ResetPassword(c *gin.Context) {
 
 // Logout clears the authentication cookie
 func (ac *AuthController) Logout(c *gin.Context) {
-	// Clear the cookie
-	c.SetCookie("token", "", -1, "/", "", false, true)
-	
+	// Use the same secure attribute as Login so the deletion Set-Cookie
+	// matches the login cookie attributes (browsers match on name/path/domain;
+	// matching attributes keeps behavior consistent across environments).
+	secure := config.GetEnv("ENV", "development") == "production"
+	c.SetCookie("token", "", -1, "/", "", secure, true)
+
 	logger.Info("User logged out successfully")
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
@@ -403,7 +519,9 @@ func (ac *AuthController) ResendVerificationOTP(c *gin.Context) {
 		return
 	}
 
-	logger.Info("DEV verification OTP for %s: %s", req.Email, otp)
+	if devOTPLogging() {
+		logger.Info("DEV verification OTP for %s: %s", req.Email, otp)
+	}
 
 	// Send verification email
 	if err := ac.notificationService.SendEmailOTP(req.Email, otp); err != nil {

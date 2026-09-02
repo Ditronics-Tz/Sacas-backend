@@ -57,7 +57,8 @@ func Run() error {
 	router.Use(middlewares.MetricsMiddleware())
 
 	notificationService := services.NewNotificationService()
-	otpController := controllers.NewOTPController(notificationService, redisClient)
+	otpGuard := services.NewOTPAttemptGuard(redisClient)
+	otpController := controllers.NewOTPController(notificationService, redisClient, otpGuard)
 	routes.SetupRoutes(router, db, otpController, redisClient)
 
 	port := config.GetEnv("PORT", "8080")

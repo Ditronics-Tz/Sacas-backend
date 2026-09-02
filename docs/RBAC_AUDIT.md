@@ -57,6 +57,35 @@ Backend was **not** the primary leak for timetable APIs (group already has `Admi
 - `RoleMiddleware` / `RequireRole` factory: safe role string extraction; alias `RequireRole(...)`.
 - Table-driven tests: user/admin/super_admin tokens against admin, superadmin, and timetable-group handlers.
 
+## Part 2b — Auth hardening fixes (2026-09-02)
+
+Security review fixes outside RBAC but relevant to the audit trail:
+
+1. **OTP values no longer logged in production** — all dev OTP log lines are
+   gated behind `ENV != production` (registration, resend, Redis-unavailable
+   fallback). No OTP value is logged at any level in production.
+2. **Constant-time OTP comparison** — `verify-email`, `reset-password`, and
+   `/api/otp/verify` use `pkg/security.SecureCompare` (`crypto/subtle`); the
+   CSRF middleware uses the same shared helper (no duplicated logic).
+3. **Per-account OTP attempt lockout** — failed verifications counted per
+   purpose+email in Redis (`otp_attempts:{purpose}:{email}`); after
+   `OTP_MAX_ATTEMPTS` (default 5) the OTP is deleted and attempts return 429
+   until a fresh code is requested. Closes the rotating-IP brute-force gap
+   left by per-IP rate limiting (60 req/min).
+4. **Stronger password policy** — register/reset passwords require ≥8 chars
+   with at least one uppercase, one lowercase, and one digit (Gin validator
+   `strongpassword`); violations return a 400 with a clear policy message.
+5. **Logout cookie attributes** — logout now sets the same `secure` attribute
+   as login (derived from `ENV`), so cookie deletion matches login
+   environment.
+6. **Token-in-body is documented, gated** — the login body `token` field is a
+   deliberate dual-delivery design (SPA cookie vs mobile bearer); it can be
+   disabled with `AUTH_RETURN_TOKEN_IN_BODY=false` for purely SPA
+   deployments.
+
+New env vars: `OTP_MAX_ATTEMPTS` (default `5`), `AUTH_RETURN_TOKEN_IN_BODY`
+(default `true`).
+
 ---
 
 ## Part 3 — Frontend findings

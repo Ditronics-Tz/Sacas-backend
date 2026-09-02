@@ -75,6 +75,38 @@ Request metrics object (or empty message).
 
 **Response** `200` — `{ "message", "token", "user": { id, email, first_name, last_name, role, is_active } }`
 
+**Token delivery is dual-channel by design:**
+- Browser/SPA clients authenticate via the httpOnly `token` cookie.
+- Native/mobile clients use the bearer token from the `token` body field
+  (they cannot rely on browser cookie jars).
+- Purely SPA deployments can omit the body token by setting
+  `AUTH_RETURN_TOKEN_IN_BODY=false` (default `true`) to reduce token exposure.
+
+### Password policy
+
+Applies to `POST /api/auth/register` (`password`) and
+`POST /api/auth/reset-password` (`new_password`):
+
+- Minimum 8 characters
+- At least one uppercase letter, one lowercase letter, and one digit
+- Violations return `400` with:
+  `"Password must be at least 8 characters and contain at least one uppercase letter, one lowercase letter, and one digit"`
+
+### OTP verification & attempt lockout
+
+Applies to `POST /api/auth/verify-email`, `POST /api/auth/reset-password`, and
+`POST /api/otp/verify`:
+
+- Failed attempts are counted **per account** (per purpose + email) in Redis —
+  the per-IP rate limit alone does not stop distributed brute-force attempts.
+- After `OTP_MAX_ATTEMPTS` failed attempts (default `5`), the OTP is deleted
+  and further attempts return **`429`** with
+  `"Too many failed attempts..."` until a fresh code is requested.
+- The attempt counter expires with the OTP's own TTL and is cleared on
+  success.
+- OTP values are never logged in production (`ENV=production`); in other
+  environments they are logged at Info level for development convenience.
+
 ### POST `/api/auth/verify-email`
 
 ```json
@@ -93,7 +125,7 @@ Request metrics object (or empty message).
 {
   "email": "user@example.com",
   "otp": "123456",
-  "new_password": "newsecret"
+  "new_password": "NewSecret1"
 }
 ```
 
