@@ -168,6 +168,31 @@ Admin dashboard `counts`: `faculties`, `courses`, `modules`, `classes`, `rooms`,
 
 ---
 
+## Generation settings (JWT + super_admin)
+
+System-wide singleton for timetable generation engine options (solver-tunable
+knobs). One settings row affects **every** future generation run — hence the
+`superadmin` gating. If never configured, `GET` returns populated defaults
+(`time_budget_sec: 30`, empty `soft_weights`) rather than erroring.
+
+| Method | Path | Body |
+|--------|------|------|
+| GET | `/api/protected/superadmin/generation-settings` | — → `{ "settings": { "id", "time_budget_sec", "soft_weights", "created_at", "updated_at" } }` |
+| PUT | `/api/protected/superadmin/generation-settings` | partial: `{ "time_budget_sec"?, "soft_weights"? }` |
+
+Validation (server-side, rejects with `400`):
+
+- `time_budget_sec`: finite, `> 0`, `<= 300`
+- `soft_weights`: keys restricted to the allow-list
+  `preferred_start_weight`, `session_spread_weight` (unknown keys are rejected
+  with a message listing the allowed keys); values must be finite `>= 0`
+- Omitted fields leave current values unchanged
+
+Note: settings are stored but **not yet consumed** by `buildSolverRequest` —
+wiring them into generation is ticket 136.c.
+
+---
+
 ## Timetable domain (JWT + admin)
 
 Base: `/api/protected/timetable`

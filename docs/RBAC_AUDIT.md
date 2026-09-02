@@ -30,6 +30,7 @@ Shared institutional data (faculties, rooms, staff, …) is **global once admin-
 | `/api/protected/users/*` | JWT + ActiveUser + **AdminMiddleware** (per-route) | admin+ | PASS |
 | `/api/protected/admin/*` | JWT + ActiveUser + **AdminMiddleware** (group) | admin+ | PASS |
 | `/api/protected/superadmin/*` | JWT + ActiveUser + **SuperAdminMiddleware** | super_admin only | PASS |
+| `GET/PUT /api/protected/superadmin/generation-settings` | JWT + ActiveUser + **SuperAdminMiddleware** (group) | super_admin only | PASS |
 | `/api/protected/timetable/*` (all faculties, courses, modules, classes, rooms, staff, subjects, generate, CRUD) | JWT + ActiveUser + **AdminMiddleware** (group `.Use`) | admin+ | PASS |
 
 **Role source:** `JWTAuthMiddleware` parses signed JWT and `c.Set("role", claims["role"])`. `RoleMiddleware` / `AdminMiddleware` read **only** from Gin context (JWT claims), never from request body/query/header.
@@ -110,6 +111,7 @@ New env vars: `OTP_MAX_ATTEMPTS` (default `5`), `AUTH_RETURN_TOKEN_IN_BODY`
 | Timetable domain API | ❌ 403 | ✅ | ✅ |
 | Admin dashboard API | ❌ 403 | ✅ | ✅ |
 | Superadmin system info | ❌ 403 | ❌ 403 | ✅ |
+| Generation settings (GET/PUT) | ❌ 403 | ❌ 403 | ✅ |
 | Sidebar: admin sections | hidden | shown | shown |
 | Direct `/rooms/view` URL | permissions screen | page | page |
 

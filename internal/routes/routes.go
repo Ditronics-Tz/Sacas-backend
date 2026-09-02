@@ -31,6 +31,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	roomRepo := repositories.NewRoomRepository(db)
 	subjectRepo := repositories.NewSubjectRepository(db)
 	timetableRepo := repositories.NewTimetableRepository(db)
+	generationSettingsRepo := repositories.NewGenerationSettingsRepository(db)
 
 	notificationService := services.NewNotificationService()
 	otpGuard := services.NewOTPAttemptGuard(redisClient)
@@ -48,6 +49,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	roomController := controllers.NewRoomController(roomRepo)
 	subjectController := controllers.NewSubjectController(subjectRepo)
 	timetableController := controllers.NewTimetableController(timetableRepo, staffRepo, timetableService)
+	generationSettingsController := controllers.NewGenerationSettingsController(generationSettingsRepo)
 
 	// Security middleware
 	securityConfig := middlewares.DefaultSecurityConfig()
@@ -267,6 +269,12 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 						},
 					})
 				})
+
+				// Generation settings: system-wide solver knobs — changes affect
+				// every future generation run, hence super_admin only (not the
+				// wider admin group).
+				superadmin.GET("/generation-settings", generationSettingsController.Get)
+				superadmin.PUT("/generation-settings", generationSettingsController.Update)
 			}
 
 			// Timetable Management endpoints (Admin access required)
