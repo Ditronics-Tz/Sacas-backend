@@ -178,6 +178,9 @@ func (c *TimetableController) GetTimetableByCourse(ctx *gin.Context) {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get timetable"})
 		return
 	}
+	if timetables == nil {
+		timetables = []models.Timetable{}
+	}
 
 	ctx.JSON(http.StatusOK, gin.H{"timetables": timetables})
 }
