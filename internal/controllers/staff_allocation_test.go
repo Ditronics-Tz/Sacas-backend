@@ -31,6 +31,7 @@ func (r *stubStaffRepo) GetByID(id uint) (*models.Staff, error) {
 	return &cp, nil
 }
 func (r *stubStaffRepo) GetByEmail(email string) (*models.Staff, error)     { return nil, errNotFound }
+func (r *stubStaffRepo) GetByUserID(userID uint) (*models.Staff, error)     { return nil, errNotFound }
 func (r *stubStaffRepo) Update(s *models.Staff) error                       { return nil }
 func (r *stubStaffRepo) Delete(id uint) error                               { return nil }
 func (r *stubStaffRepo) GetAll(limit, offset int) ([]models.Staff, error)   { return nil, nil }

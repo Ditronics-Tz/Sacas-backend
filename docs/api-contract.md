@@ -140,6 +140,18 @@ Admin dashboard `counts`: `faculties`, `courses`, `modules`, `classes`, `rooms`,
 
 Base: `/api/protected/timetable`
 
+### My timetable (any authenticated user — own data only)
+
+| Method | Path | Response |
+|--------|------|----------|
+| GET | `/api/protected/timetable/my` | `{ "timetables": [...] }` |
+
+The Staff record is resolved **server-side only**, from the JWT user via the
+`staffs.user_id` foreign key. Client-supplied `staff_id` values (query, body,
+path) are ignored, so a `role=user` account can never read another staff
+member's timetable. Returns `404` if no Staff profile is linked to the
+account. Admins can still read any staff timetable via `/by-staff/:staff_id`.
+
 List endpoints accept: `?limit=10&offset=0`.
 
 ### Faculties (UI: Departments)

@@ -32,6 +32,10 @@ type CreateStaffRequest struct {
 	PhoneNumber string `json:"phone_number,omitempty"`
 	Title       string `json:"title,omitempty"`
 	StaffType   string `json:"staff_type,omitempty"`
+	// UserID optionally links this staff record to an existing login account
+	// (User). Admin-only field; this is the trusted User→Staff mapping used by
+	// GET /protected/timetable/my. Unique constraint prevents double-linking.
+	UserID *uint `json:"user_id,omitempty"`
 }
 
 type UpdateStaffRequest struct {
@@ -44,6 +48,8 @@ type UpdateStaffRequest struct {
 	PhoneNumber *string `json:"phone_number,omitempty"`
 	Title       *string `json:"title,omitempty"`
 	StaffType   *string `json:"staff_type,omitempty"`
+	// UserID links/relinks this staff record to a login account (admin-only).
+	UserID *uint `json:"user_id,omitempty"`
 }
 
 func (c *StaffController) CreateStaff(ctx *gin.Context) {
@@ -67,6 +73,7 @@ func (c *StaffController) CreateStaff(ctx *gin.Context) {
 		PhoneNumber: req.PhoneNumber,
 		Title:       req.Title,
 		StaffType:   req.StaffType,
+		UserID:      req.UserID,
 	}
 
 	if req.Preferences != "" {
@@ -180,6 +187,9 @@ func (c *StaffController) UpdateStaff(ctx *gin.Context) {
 	}
 	if req.StaffType != nil {
 		staff.StaffType = *req.StaffType
+	}
+	if req.UserID != nil {
+		staff.UserID = req.UserID
 	}
 
 	if err := c.staffRepo.Update(staff); err != nil {

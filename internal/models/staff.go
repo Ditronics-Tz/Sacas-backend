@@ -22,7 +22,15 @@ type Staff struct {
 	Title       string         `json:"title"`
 	StaffType   string         `json:"staff_type"`
 
+	// UserID links this Staff record to the login account (User) that owns it.
+	// Nullable: a staff member may exist without a login account.
+	// Unique: at most one Staff record per User (1:1).
+	// This is the ONLY trusted link used to resolve an authenticated user to
+	// their staff timetable; client-supplied staff IDs are never trusted.
+	UserID *uint `gorm:"uniqueIndex" json:"user_id,omitempty"`
+
 	// Relationships
+	User       User        `gorm:"foreignKey:UserID" json:"user,omitempty"`
 	Faculty    Faculty     `gorm:"foreignKey:FacultyID" json:"faculty,omitempty"`
 	Modules    []Module    `gorm:"many2many:staff_modules;" json:"modules,omitempty"`
 	Timetables []Timetable `json:"timetables,omitempty"`

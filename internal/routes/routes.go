@@ -46,7 +46,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	classController := controllers.NewClassController(classRepo)
 	roomController := controllers.NewRoomController(roomRepo)
 	subjectController := controllers.NewSubjectController(subjectRepo)
-	timetableController := controllers.NewTimetableController(timetableRepo, timetableService)
+	timetableController := controllers.NewTimetableController(timetableRepo, staffRepo, timetableService)
 
 	// Security middleware
 	securityConfig := middlewares.DefaultSecurityConfig()
@@ -171,6 +171,12 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 		{
 			protected.GET("/profile", userController.GetProfile)
 			protected.PUT("/change-password", userController.ChangePassword)
+
+			// Authenticated staff member's own timetable. Resolved strictly from
+			// the JWT user (Staff.user_id FK); client-supplied staff IDs are
+			// ignored, so a role=user account can only ever read its own
+			// timetable. Registered before the admin-only /timetable group.
+			protected.GET("/timetable/my", timetableController.GetMyTimetable)
 
 			users := protected.Group("/users")
 			{

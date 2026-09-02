@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,15 +16,18 @@ import (
 
 type TimetableController struct {
 	timetableRepo    repositories.TimetableRepository
+	staffRepo        repositories.StaffRepository
 	timetableService *services.TimetableService
 }
 
 func NewTimetableController(
 	timetableRepo repositories.TimetableRepository,
+	staffRepo repositories.StaffRepository,
 	timetableService *services.TimetableService,
 ) *TimetableController {
 	return &TimetableController{
 		timetableRepo:    timetableRepo,
+		staffRepo:        staffRepo,
 		timetableService: timetableService,
 	}
 }
@@ -149,6 +153,62 @@ func (c *TimetableController) GetTimetableByStaff(ctx *gin.Context) {
 	timetables, err := c.timetableRepo.GetByStaff(uint(staffID))
 	if err != nil {
 		logger.Error("Failed to get timetable for staff: %v", err)
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get timetable"})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"timetables": timetables})
+}
+
+// GetMyTimetable handles GET /protected/timetable/my.
+//
+// Security invariants:
+//   - Requires authentication (JWT middleware on the protected group).
+//   - The Staff record is resolved ONLY from the authenticated user_id in the
+//     JWT (Staff.user_id FK). Any staff_id/query/body value sent by the client
+//     is ignored, so a role=user account can never read another staff
+//     member's timetable by manipulating an ID.
+//   - Existing admin endpoints (/timetable/by-staff/:staff_id etc.) are
+//     untouched.
+func (c *TimetableController) GetMyTimetable(ctx *gin.Context) {
+	// 1. Obtain the authenticated User from the JWT/session context.
+	rawUserID, exists := ctx.Get("user_id")
+	if !exists || rawUserID == nil {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+	var userID uint
+	switch v := rawUserID.(type) {
+	case float64:
+		userID = uint(v)
+	case int:
+		userID = uint(v)
+	case uint:
+		userID = v
+	case int64:
+		userID = uint(v)
+	default:
+		var n uint64
+		if _, err := fmt.Sscanf(fmt.Sprint(v), "%d", &n); err != nil {
+			ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user in token"})
+			return
+		}
+		userID = uint(n)
+	}
+
+	// 2. Resolve that User to their Staff record via the existing FK
+	//    relationship (staff.user_id). No client-provided staff_id is read.
+	staff, err := c.staffRepo.GetByUserID(userID)
+	if err != nil {
+		logger.Warn("No staff profile linked to user %d for /timetable/my", userID)
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "No staff profile is linked to your account"})
+		return
+	}
+
+	// 3. Return only this staff member's timetable, in the frontend-compatible shape.
+	timetables, err := c.timetableRepo.GetByStaff(staff.ID)
+	if err != nil {
+		logger.Error("Failed to get timetable for staff %d: %v", staff.ID, err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get timetable"})
 		return
 	}

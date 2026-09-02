@@ -24,6 +24,32 @@ func RunMigrations(db *gorm.DB) error {
 		log.Printf("Migration failed: %v", err)
 		return err
 	}
+
+	// One-time, server-side bootstrap of the User→Staff relationship:
+	// link staff rows without a user_id to the login account whose email
+	// matches the staff email. Emails are unique on both tables, and this
+	// runs on the server only — client input is never involved.
+	if err := BackfillStaffUserLinks(db); err != nil {
+		log.Printf("Staff→User backfill failed: %v", err)
+		return err
+	}
+	return nil
+}
+
+// BackfillStaffUserLinks idempotently sets staff.user_id from matching user
+// emails. Safe to run on every boot; existing links are never overwritten.
+func BackfillStaffUserLinks(db *gorm.DB) error {
+	result := db.Model(&models.Staff{}).
+		Where("user_id IS NULL AND deleted_at IS NULL").
+		Where("email IN (?)", db.Model(&models.User{}).Select("email").Where("deleted_at IS NULL")).
+		Update("user_id", db.Model(&models.User{}).Select("id").
+			Where("users.email = staffs.email AND users.deleted_at IS NULL"))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		log.Printf("Backfilled %d staff record(s) with linked user accounts", result.RowsAffected)
+	}
 	return nil
 }
 
