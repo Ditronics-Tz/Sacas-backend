@@ -23,6 +23,10 @@ type TimetableService struct {
 	roomRepo      repositories.RoomRepository
 	subjectRepo   repositories.SubjectRepository
 	solver        *SolverClient
+	// generationSettingsRepo provides admin-configured solver knobs
+	// (136.a). May be nil in legacy call sites/tests, in which case the
+	// hardcoded defaults below are used.
+	generationSettingsRepo repositories.GenerationSettingsRepository
 }
 
 func NewTimetableService(
@@ -33,15 +37,17 @@ func NewTimetableService(
 	roomRepo repositories.RoomRepository,
 	subjectRepo repositories.SubjectRepository,
 	solver *SolverClient,
+	generationSettingsRepo repositories.GenerationSettingsRepository,
 ) *TimetableService {
 	return &TimetableService{
-		timetableRepo: timetableRepo,
-		staffRepo:     staffRepo,
-		classRepo:     classRepo,
-		moduleRepo:    moduleRepo,
-		roomRepo:      roomRepo,
-		subjectRepo:   subjectRepo,
-		solver:        solver,
+		timetableRepo:          timetableRepo,
+		staffRepo:              staffRepo,
+		classRepo:              classRepo,
+		moduleRepo:             moduleRepo,
+		roomRepo:               roomRepo,
+		subjectRepo:            subjectRepo,
+		solver:                 solver,
+		generationSettingsRepo: generationSettingsRepo,
 	}
 }
 
@@ -180,9 +186,31 @@ func (s *TimetableService) buildSolverRequest(classID uint, persist bool) (*Solv
 		return nil, err
 	}
 
+	// Solver knobs come from the admin-configured generation settings (136.a).
+	// Fallback behavior:
+	//   - repo nil or ErrNotConfigured (no settings row yet, fresh
+	//     deployment) → use the same defaults hardcoded before this change
+	//     (30s budget, no soft weights) — do NOT hard-fail generation just
+	//     because no admin has visited the settings page.
+	//   - any other repository error (DB down) → fail loudly; silently using
+	//     defaults could mask a production issue.
+	timeBudgetSec := 30.0
+	var softWeights map[string]float64
+	if s.generationSettingsRepo != nil {
+		settings, err := s.generationSettingsRepo.Get()
+		if err != nil && !errors.Is(err, repositories.ErrNotConfigured) {
+			return nil, fmt.Errorf("failed to load generation settings: %w", err)
+		}
+		if settings != nil {
+			timeBudgetSec = settings.TimeBudgetSec
+			softWeights = settings.SoftWeightsMap()
+		}
+	}
+
 	req := &SolverRequest{
 		ClassID:       classID,
-		TimeBudgetSec: 30,
+		TimeBudgetSec: timeBudgetSec,
+		SoftWeights:   softWeights,
 		Persist:       persist,
 		WorkingDays:   []string{"monday", "tuesday", "wednesday", "thursday", "friday"},
 		TimeSlots:     []string{"08:00", "09:00", "10:00", "11:00", "13:00", "14:00", "15:00", "16:00"},

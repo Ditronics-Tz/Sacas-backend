@@ -53,9 +53,21 @@ Request body (snake_case):
     }
   ],
   "pinned_entries": [],
-  "soft_weights": {}
+  "soft_weights": {
+    "preferred_start_weight": 2.5,
+    "session_spread_weight": 1.0
+  }
 }
 ```
+
+`soft_weights` values come from the admin-configured generation settings
+(`GET/PUT /api/protected/superadmin/generation-settings`). Allowed keys:
+`preferred_start_weight` (bias staff toward their `preferred_start` slot) and
+`session_spread_weight` (penalize packing more than 2 sessions into one
+staff-day). When no settings row exists yet, the backend sends the same
+defaults as before (30s time budget; `soft_weights` omitted from the payload
+when empty). The solver service currently accepts the dict but applies its
+own hardcoded objectives — reading the weights is tracked separately.
 
 Response:
 

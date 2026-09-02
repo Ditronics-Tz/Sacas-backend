@@ -36,7 +36,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	notificationService := services.NewNotificationService()
 	otpGuard := services.NewOTPAttemptGuard(redisClient)
 	solverClient := services.NewSolverClient()
-	timetableService := services.NewTimetableService(timetableRepo, staffRepo, classRepo, moduleRepo, roomRepo, subjectRepo, solverClient)
+	timetableService := services.NewTimetableService(timetableRepo, staffRepo, classRepo, moduleRepo, roomRepo, subjectRepo, solverClient, generationSettingsRepo)
 
 	// Initialize controllers
 	authController := controllers.NewAuthController(userRepo, notificationService, redisClient, otpGuard)
