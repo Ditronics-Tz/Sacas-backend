@@ -42,7 +42,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	authController := controllers.NewAuthController(userRepo, notificationService, redisClient, otpGuard)
 	userController := controllers.NewUserController(userRepo)
 	facultyController := controllers.NewFacultyController(facultyRepo)
-	staffController := controllers.NewStaffController(staffRepo, moduleRepo)
+	staffController := controllers.NewStaffControllerWithUser(staffRepo, moduleRepo, userRepo)
 	courseController := controllers.NewCourseController(courseRepo)
 	moduleController := controllers.NewModuleController(moduleRepo)
 	classController := controllers.NewClassController(classRepo)
@@ -174,6 +174,10 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 		{
 			protected.GET("/profile", userController.GetProfile)
 			protected.PUT("/change-password", userController.ChangePassword)
+
+			// Authenticated staff member's own Staff profile. Resolved from JWT
+			// user_id via staff.user_id FK; returns 404 if no linked staff.
+			protected.GET("/me/staff", staffController.GetMyStaff)
 
 			// Authenticated staff member's own timetable. Resolved strictly from
 			// the JWT user (Staff.user_id FK); client-supplied staff IDs are

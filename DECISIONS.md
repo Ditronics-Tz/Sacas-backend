@@ -70,3 +70,27 @@ Room building/room_no/description live in `features` JSON (extended shape docume
 
 Timetable group already used AdminMiddleware. Hardened RoleMiddleware type safety, added RequireRole factory + regression tests. Live probe: role=user → 403 on GET /timetable/faculties. Full matrix: docs/RBAC_AUDIT.md.
 
+## User ↔ Staff linkage (2026-09-04)
+
+**Decision: nullable `Staff.UserID` FK (unique) — NOT `User.StaffID`.**
+
+- `Staff` already has `Email` but no FK to `User`; `User` is the auth/login account.
+- Options considered: `User.StaffID` vs `Staff.UserID`. Chose `Staff.UserID *uint` (`gorm:"uniqueIndex"`, `foreignKey:UserID`, nullable) because:
+  1. `Staff` is the dependent entity (a login account may exist without a staff profile; a staff row may exist without a login account — e.g. imported staff). Making `User` hold `StaffID` would force every user to have a staff slot and imply a user can have at most one staff, but encoded on the wrong side.
+  2. `Staff.UserID` yields a clean 1:1 nullable unique index: at most one `Staff` per `User`, multiple staff can be unlinked (`NULL` not conflicting).
+  3. Queries needed are `WHERE staffs.user_id = ?` (resolve authenticated `user_id` → staff). Index on `staffs.user_id` is efficient; reverse would require `WHERE users.staff_id = ?` plus join.
+  4. Migration is a single additive nullable column via `AutoMigrate`; no backfill of `users` table, no risk to existing auth flows.
+
+**Migration:** `internal/database/migrations.go:RunMigrations` `AutoMigrate(&Staff{})` adds `user_id` column + unique index (`staffs.user_id`). Idempotent `BackfillStaffUserLinks()` runs once on boot: `UPDATE staffs SET user_id = users.id WHERE user_id IS NULL AND email IN (SELECT email FROM users)` — server-side only, never overwrites an existing link, logged row count. This is *not* per-request silent matching; it is a one-time bootstrap for legacy deployments that had matching emails before the FK existed.
+
+**Linking policy (admin creation):**
+- `POST /timetable/staff` and `PUT /timetable/staff/:id` accept optional `user_id` (admin-only). The controller validates `user_id` exists and is not already linked to another staff; duplicate link → `400` `"user_id X is already linked to staff Y"`. Missing user → `400`.
+- **Never auto-link by email on create/update** — the handler does not inspect `staff.email` to find a user. An admin must explicitly supply `user_id` (selected from a user list or confirmed by matching email in UI with explicit confirmation). This prevents silent misattribution on typos/collisions.
+
+**Endpoints that rely on this link (trusted path):**
+- `GET /api/protected/me/staff` → returns `{"staff": <Staff>}` linked to `JWT user_id`; `404 {"error": "No staff profile is linked to your account", "staff": null}` if none — not `500`.
+- `GET /api/protected/timetable/my` → resolves `user_id → staff → timetables`; same 404 semantics.
+- Both ignore any client-supplied `staff_id` query/path/body values.
+
+**Security invariant:** verified by `internal/controllers/timetable_my_test.go` and `internal/controllers/me_staff_test.go`.
+

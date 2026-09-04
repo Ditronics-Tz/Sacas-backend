@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -13,12 +14,22 @@ import (
 type StaffController struct {
 	staffRepo  repositories.StaffRepository
 	moduleRepo repositories.ModuleRepository
+	userRepo   repositories.UserRepository
 }
 
 func NewStaffController(staffRepo repositories.StaffRepository, moduleRepo repositories.ModuleRepository) *StaffController {
 	return &StaffController{
 		staffRepo:  staffRepo,
 		moduleRepo: moduleRepo,
+	}
+}
+
+// NewStaffControllerWithUser is used in production wiring to allow UserID validation.
+func NewStaffControllerWithUser(staffRepo repositories.StaffRepository, moduleRepo repositories.ModuleRepository, userRepo repositories.UserRepository) *StaffController {
+	return &StaffController{
+		staffRepo:  staffRepo,
+		moduleRepo: moduleRepo,
+		userRepo:   userRepo,
 	}
 }
 
@@ -62,6 +73,15 @@ func (c *StaffController) CreateStaff(ctx *gin.Context) {
 
 	if req.MaxHours == 0 {
 		req.MaxHours = 40
+	}
+
+	// Explicit UserID linking only — never auto-match by email.
+	// If UserID is supplied, validate the User exists and is not already linked.
+	if req.UserID != nil {
+		if err := c.validateUserLink(nil, *req.UserID); err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	staff := &models.Staff{
@@ -189,6 +209,10 @@ func (c *StaffController) UpdateStaff(ctx *gin.Context) {
 		staff.StaffType = *req.StaffType
 	}
 	if req.UserID != nil {
+		if err := c.validateUserLink(&staff.ID, *req.UserID); err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
 		staff.UserID = req.UserID
 	}
 
@@ -317,4 +341,57 @@ func (c *StaffController) ListModuleStaff(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{"staff": staff})
+}
+
+// GetMyStaff handles GET /api/protected/me/staff — returns the Staff record
+// linked to the currently authenticated user via staff.user_id FK.
+// Spec: user with no linked staff gets 404 (clear, not 500); linked user gets staff.
+func (c *StaffController) GetMyStaff(ctx *gin.Context) {
+	rawUserID, exists := ctx.Get("user_id")
+	if !exists || rawUserID == nil {
+		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
+	var userID uint
+	switch v := rawUserID.(type) {
+	case float64:
+		userID = uint(v)
+	case int:
+		userID = uint(v)
+	case uint:
+		userID = v
+	case int64:
+		userID = uint(v)
+	default:
+		var n uint64
+		if _, err := fmt.Sscanf(fmt.Sprint(v), "%d", &n); err != nil {
+			ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user in token"})
+			return
+		}
+		userID = uint(n)
+	}
+
+	staff, err := c.staffRepo.GetByUserID(userID)
+	if err != nil {
+		// No linked staff — not a server error.
+		ctx.JSON(http.StatusNotFound, gin.H{"error": "No staff profile is linked to your account", "staff": nil})
+		return
+	}
+	ctx.JSON(http.StatusOK, gin.H{"staff": staff})
+}
+
+// validateUserLink ensures UserID exists and is not already linked to another staff.
+func (c *StaffController) validateUserLink(currentStaffID *uint, userID uint) error {
+	if c.userRepo != nil {
+		if _, err := c.userRepo.GetByID(userID); err != nil {
+			return fmt.Errorf("linked user_id %d does not exist", userID)
+		}
+	}
+	// Enforce 1:1 — at most one staff per user. Check existing link.
+	if existing, err := c.staffRepo.GetByUserID(userID); err == nil && existing != nil {
+		if currentStaffID == nil || existing.ID != *currentStaffID {
+			return fmt.Errorf("user_id %d is already linked to staff %d", userID, existing.ID)
+		}
+	}
+	return nil
 }

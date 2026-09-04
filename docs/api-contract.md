@@ -197,6 +197,14 @@ wiring them into generation is ticket 136.c.
 
 Base: `/api/protected/timetable`
 
+### My staff profile (any authenticated user — own data only)
+
+| Method | Path | Response |
+|--------|------|----------|
+| GET | `/api/protected/me/staff` | `{ "staff": {...} }` or `404 {"error":"No staff profile is linked to your account","staff":null}` |
+
+Resolves **server-side only** from the JWT `user_id` via `staffs.user_id` FK. Used to answer “which Staff record belongs to the currently logged-in user” without the client supplying a staff ID. Returns `404` (not `500`) when no Staff is linked — callers should treat `404`/`null` as “no staff profile”, not as a hard error.
+
 ### My timetable (any authenticated user — own data only)
 
 | Method | Path | Response |
@@ -288,10 +296,10 @@ List endpoints accept: `?limit=10&offset=0`.
 
 | Method | Path | Body |
 |--------|------|------|
-| POST | `/staff` | `{ "name", "email", "faculty_id", "max_hours?", "preferences?", "rfid_id?", "phone_number?", "title?", "staff_type?" }` |
+| POST | `/staff` | `{ "name", "email", "faculty_id", "max_hours?", "preferences?", "rfid_id?", "phone_number?", "title?", "staff_type?", "user_id?" }` — `user_id` optionally links to an existing `User` (admin must supply explicit user ID; never auto-matched by email) |
 | GET | `/staff` | |
 | GET | `/staff/:id` | |
-| PUT | `/staff/:id` | partial |
+| PUT | `/staff/:id` | partial (including `user_id` to (re)link) |
 | DELETE | `/staff/:id` | |
 | POST | `/staff/:id/modules/:module_id` | assign |
 | DELETE | `/staff/:id/modules/:module_id` | unassign |
