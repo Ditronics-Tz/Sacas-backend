@@ -39,9 +39,10 @@ func NewAuthController(userRepo repositories.UserRepository, notificationService
 
 // devOTPLogging reports whether OTP values may appear in logs. OTP values are
 // NEVER logged in production, at any level, because logs may be shipped to
-// third-party aggregation services.
+// third-party aggregation services. The check is case-insensitive so
+// ENV=PRODUCTION, Production, etc. are all treated as production.
 func devOTPLogging() bool {
-	return config.GetEnv("ENV", "development") != "production"
+	return !strings.EqualFold(config.GetEnv("ENV", "development"), "production")
 }
 
 // --- Password policy (shared by RegisterRequest and ResetPasswordRequest) ---
