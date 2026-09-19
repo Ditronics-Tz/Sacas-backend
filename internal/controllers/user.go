@@ -3,6 +3,7 @@ package controllers
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -12,6 +13,7 @@ import (
 	"go_boilerplate/internal/models"
 	"go_boilerplate/internal/repositories"
 	"go_boilerplate/pkg/logger"
+	"go_boilerplate/pkg/security"
 )
 
 type UserController struct {
@@ -27,7 +29,7 @@ func NewUserController(userRepo repositories.UserRepository) *UserController {
 // CreateUserRequest represents the request payload for creating a user
 type CreateUserRequest struct {
 	Email       string          `json:"email" binding:"required,email"`
-	Password    string          `json:"password" binding:"required,min=6"`
+	Password    string          `json:"password" binding:"required,min=8,strongpassword"`
 	FirstName   string          `json:"first_name" binding:"required,min=2,max=50"`
 	LastName    string          `json:"last_name" binding:"required,min=2,max=50"`
 	PhoneNumber string          `json:"phone_number,omitempty"`
@@ -47,7 +49,7 @@ type UpdateUserRequest struct {
 // ChangePasswordRequest represents the request payload for changing password
 type ChangePasswordRequest struct {
 	CurrentPassword string `json:"current_password" binding:"required"`
-	NewPassword     string `json:"new_password" binding:"required,min=6"`
+	NewPassword     string `json:"new_password" binding:"required,min=8,strongpassword"`
 }
 
 // GetUsers retrieves a paginated list of users
@@ -116,7 +118,15 @@ func (uc *UserController) GetUser(c *gin.Context) {
 func (uc *UserController) CreateUser(c *gin.Context) {
 	var req CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		if strings.Contains(err.Error(), "Password") || strings.Contains(err.Error(), "password") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": security.PasswordPolicyMessage})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !security.ValidPassword(req.Password) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": security.PasswordPolicyMessage})
 		return
 	}
 
@@ -304,7 +314,15 @@ func (uc *UserController) ChangePassword(c *gin.Context) {
 
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		if strings.Contains(err.Error(), "NewPassword") || strings.Contains(err.Error(), "new_password") || strings.Contains(err.Error(), "Password") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": security.PasswordPolicyMessage})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if !security.ValidPassword(req.NewPassword) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": security.PasswordPolicyMessage})
 		return
 	}
 

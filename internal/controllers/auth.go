@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gin-gonic/gin/binding"
-	"github.com/go-playground/validator/v10"
 	"github.com/go-redis/redis/v8"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -45,42 +43,11 @@ func devOTPLogging() bool {
 	return !strings.EqualFold(config.GetEnv("ENV", "development"), "production")
 }
 
-// --- Password policy (shared by RegisterRequest and ResetPasswordRequest) ---
+// Re-export shared policy for callers that reference the message
+const passwordPolicyMessage = security.PasswordPolicyMessage
 
-const minPasswordLength = 8
-
-// validPassword enforces: min 8 chars, at least one uppercase, one lowercase,
-// one digit. Special characters are deliberately not required.
-func validPassword(pw string) bool {
-	if len(pw) < minPasswordLength {
-		return false
-	}
-	var hasUpper, hasLower, hasDigit bool
-	for _, r := range pw {
-		switch {
-		case r >= 'A' && r <= 'Z':
-			hasUpper = true
-		case r >= 'a' && r <= 'z':
-			hasLower = true
-		case r >= '0' && r <= '9':
-			hasDigit = true
-		}
-	}
-	return hasUpper && hasLower && hasDigit
-}
-
-const passwordPolicyMessage = "Password must be at least 8 characters and contain at least one uppercase letter, one lowercase letter, and one digit"
-
-// strongPassword is the Gin validator registered as "strongpassword".
-func strongPassword(fl validator.FieldLevel) bool {
-	return validPassword(fl.Field().String())
-}
-
-func init() {
-	if v, ok := binding.Validator.Engine().(*validator.Validate); ok {
-		_ = v.RegisterValidation("strongpassword", strongPassword)
-	}
-}
+// validPassword delegates to the shared validator (single source of truth)
+func validPassword(pw string) bool { return security.ValidPassword(pw) }
 
 type RegisterRequest struct {
 	Email       string `json:"email" binding:"required,email"`
@@ -230,8 +197,13 @@ func (ac *AuthController) Login(c *gin.Context) {
 		return
 	}
 
-	// Set secure HTTP-only cookie
+	// Set secure HTTP-only cookie with correct SameSite
 	secure := config.GetEnv("ENV", "development") == "production"
+	if secure {
+		c.SetSameSite(http.SameSiteStrictMode)
+	} else {
+		c.SetSameSite(http.SameSiteLaxMode)
+	}
 	c.SetCookie("token", tokenString, 24*3600, "/", "", secure, true)
 
 	logger.Info("User logged in successfully: %s (ID: %d)", user.Email, user.ID)
@@ -478,6 +450,11 @@ func (ac *AuthController) Logout(c *gin.Context) {
 	// matches the login cookie attributes (browsers match on name/path/domain;
 	// matching attributes keeps behavior consistent across environments).
 	secure := config.GetEnv("ENV", "development") == "production"
+	if secure {
+		c.SetSameSite(http.SameSiteStrictMode)
+	} else {
+		c.SetSameSite(http.SameSiteLaxMode)
+	}
 	c.SetCookie("token", "", -1, "/", "", secure, true)
 
 	logger.Info("User logged out successfully")

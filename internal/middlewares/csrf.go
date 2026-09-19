@@ -4,11 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 
+	"go_boilerplate/internal/config"
 	"go_boilerplate/pkg/logger"
 	"go_boilerplate/pkg/security"
 )
@@ -48,7 +50,13 @@ func IssueCSRFToken(c *gin.Context, redisClient *redis.Client) (string, error) {
 	}
 	// non-HttpOnly so SPA can read cookie for double-submit mirror if needed;
 	// primary path is response header X-CSRF-Token.
-	c.SetCookie(CSRFCookieName, token, int(CSRFTokenTTL.Seconds()), "/", "", false, false)
+	secure := strings.EqualFold(config.GetEnv("ENV", "development"), "production")
+	if secure {
+		c.SetSameSite(http.SameSiteStrictMode)
+	} else {
+		c.SetSameSite(http.SameSiteLaxMode)
+	}
+	c.SetCookie(CSRFCookieName, token, int(CSRFTokenTTL.Seconds()), "/", "", secure, false)
 	c.Header(CSRFHeaderName, token)
 	return token, nil
 }

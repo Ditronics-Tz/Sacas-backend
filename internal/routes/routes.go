@@ -2,6 +2,7 @@ package routes
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -33,7 +34,13 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	timetableRepo := repositories.NewTimetableRepository(db)
 	generationSettingsRepo := repositories.NewGenerationSettingsRepository(db)
 
-	notificationService := services.NewNotificationService()
+	notificationService, err := services.NewNotificationService()
+	if err != nil {
+		// Production guard already handled in app.Run; dev fallback to log provider
+		// Must panic here so misconfig is visible at boot, not silent
+		panic(fmt.Sprintf("notification config: %v", err))
+	}
+	_ = notificationService // keep for authController below
 	otpGuard := services.NewOTPAttemptGuard(redisClient)
 	solverClient := services.NewSolverClient()
 	timetableService := services.NewTimetableService(timetableRepo, staffRepo, classRepo, moduleRepo, roomRepo, subjectRepo, solverClient, generationSettingsRepo)
@@ -63,7 +70,6 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 			RedisClient: redisClient,
 			SkipPaths: []string{
 				"/api/health",
-				"/api/metrics",
 			},
 		}
 		router.Use(middlewares.CSRFMiddleware(csrfConfig))
@@ -136,14 +142,6 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				"timestamp": time.Now().UTC().Format(time.RFC3339),
 				"version":   "1.0.0",
 			})
-		})
-
-		api.GET("/metrics", func(c *gin.Context) {
-			if metrics, exists := c.Get("metrics"); exists {
-				c.JSON(200, metrics)
-			} else {
-				c.JSON(200, gin.H{"message": "No metrics available"})
-			}
 		})
 
 		// Authentication endpoints (rate-limited)
@@ -240,6 +238,15 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 						"active_users": activeUsers,
 						"admin_users":  adminUsers,
 					})
+				})
+
+				// Metrics — previously public; now admin-only (authenticated)
+				admin.GET("/metrics", func(c *gin.Context) {
+					if metrics, exists := c.Get("metrics"); exists {
+						c.JSON(200, metrics)
+					} else {
+						c.JSON(200, gin.H{"message": "No metrics available"})
+					}
 				})
 			}
 

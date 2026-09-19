@@ -25,11 +25,11 @@ type User struct {
 	CreatedAt   time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
-	Email       string         `gorm:"unique;not null" json:"email" validate:"required,email"`
-	Password    string         `gorm:"not null" json:"-" validate:"required,min=6"`
+	Email       string         `gorm:"not null" json:"email" validate:"required,email"`
+	Password    string         `gorm:"not null" json:"-" validate:"required"`
 	FirstName   string         `gorm:"not null" json:"first_name" validate:"required,min=2,max=50"`
 	LastName    string         `gorm:"not null" json:"last_name" validate:"required,min=2,max=50"`
-	PhoneNumber string         `gorm:"unique" json:"phone_number" validate:"omitempty,e164"`
+	PhoneNumber string         `json:"phone_number" validate:"omitempty,e164"`
 	Role        UserRole       `gorm:"default:'user'" json:"role" validate:"required"`
 	IsActive    bool           `gorm:"default:false" json:"is_active"`
 	IsVerified  bool           `gorm:"default:false" json:"is_verified"`

@@ -13,7 +13,7 @@ type Staff struct {
 	UpdatedAt   time.Time      `json:"updated_at"`
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 	Name        string         `gorm:"not null" json:"name" validate:"required,min=2,max=100"`
-	Email       string         `gorm:"unique;not null" json:"email" validate:"required,email"`
+	Email       string         `gorm:"not null" json:"email" validate:"required,email"`
 	FacultyID   uint           `gorm:"not null" json:"faculty_id" validate:"required"`
 	Preferences datatypes.JSON `json:"preferences"` // JSON field for flexible preferences
 	MaxHours    int            `gorm:"default:40" json:"max_hours" validate:"min=1,max=60"`

@@ -31,11 +31,21 @@ func Run() error {
 	gin.DefaultWriter = io.Discard
 	gin.DefaultErrorWriter = os.Stderr
 
+	// Production guard — fail fast before touching DB if config is unsafe
+	if err := config.ValidateProductionConfig(); err != nil {
+		return fmt.Errorf("production config: %w", err)
+	}
+
 	db := database.InitDB()
 	defer database.CloseDB(db)
 
 	if err := database.RunMigrations(db); err != nil {
 		return fmt.Errorf("database migrations: %w", err)
+	}
+
+	// First-superadmin bootstrap (production-safe) — must run before demo seed
+	if err := database.BootstrapSuperAdmin(db); err != nil {
+		return fmt.Errorf("superadmin bootstrap: %w", err)
 	}
 
 	if err := database.CreateInitialData(db); err != nil {
@@ -49,6 +59,12 @@ func Run() error {
 		return fmt.Errorf("JWT configuration: %w", err)
 	}
 
+	// Notification providers — fail fast in production if keys missing
+	notificationService, err := services.NewNotificationService()
+	if err != nil {
+		return fmt.Errorf("notification config: %w", err)
+	}
+
 	// gin.New = no default Logger/Recovery; we add our own
 	router := gin.New()
 	_ = router.SetTrustedProxies(nil)
@@ -56,7 +72,6 @@ func Run() error {
 	router.Use(middlewares.RequestLogger())
 	router.Use(middlewares.MetricsMiddleware())
 
-	notificationService := services.NewNotificationService()
 	otpGuard := services.NewOTPAttemptGuard(redisClient)
 	otpController := controllers.NewOTPController(notificationService, redisClient, otpGuard)
 	routes.SetupRoutes(router, db, otpController, redisClient)
