@@ -65,7 +65,8 @@ message rather than leaving a broken account behind.
 
 ### Institution workspace — `/api/protected/timetable/*`
 
-Gated by `RequireInstitutionWorkspace` then `RequirePermission`.
+Gated by `RequireInstitutionWorkspace`, then `DenyWriteForSupport`, then
+`RequirePermission`.
 
 | Endpoint | Permission | `user` | `exam_coord` | `academic_coord` | `admin` | `super_admin` |
 |---|---|---|---|---|---|---|
@@ -81,20 +82,82 @@ Gated by `RequireInstitutionWorkspace` then `RequirePermission`.
 | `POST/PUT/DELETE /rooms*` | `room:write` | ❌ | ❌ | ✅ | ✅ | — |
 | `GET /staff`, `/staff/:id` | `staff:read` | ✅ | ✅ | ✅ | ✅ | — |
 | `POST/PUT/DELETE /staff*` | `staff:write` | ❌ | ❌ | ✅ | ✅ | — |
-| `GET /subjects*` | `subject:read` | ✅ | ✅ | ✅ | ✅ | — |
-| `POST/PUT/DELETE /subjects*` | `subject:write` | ❌ | ❌ | ✅ | ✅ | — |
 | `GET /modules/:id/staff`, `/staff/:id/modules` | `staff:read` | ✅ | ✅ | ✅ | ✅ | — |
 | `POST/DELETE /staff/:id/modules/:module_id` | `staff:write` | ❌ | ❌ | ✅ | ✅ | — |
+| `GET /subjects*` | `subject:read` | ✅ | ✅ | ✅ | ✅ | — |
+| `POST/PUT/DELETE /subjects*` | `subject:write` | ❌ | ❌ | ✅ | ✅ | — |
 | `POST /generate/preview` | `timetable:preview` | ❌ | ✅ | ✅ | ✅ | — |
 | `POST /generate`, `POST /` | `timetable:generate` | ❌ | ✅ | ✅ | ✅ | — |
 | `GET /:id`, `/class/:id`, `/by-staff/:id`, `/by-course/:id` | `timetable:read` | ✅ | ✅ | ✅ | ✅ | — |
 | `PUT /:id`, `DELETE /:id` | `timetable:override` | ❌ | ❌ | ❌ | ✅ | — |
+| `POST /class/:class_id/publish` | `timetable:publish` | ❌ | ❌ | ✅ | ✅ | — |
+| `POST /class/:class_id/approve` | `timetable:approve` | ❌ | ❌ | ❌ | ✅ | — |
 
 `timetable:preview` is separate from `timetable:generate` so a coordinator can
-experiment without overwriting a published timetable.
-`timetable:override` (editing individual entries after the fact) is admin-only:
-it is the escape hatch that can break a generated schedule, so it is the most
-guarded write in the workspace.
+experiment without overwriting a published timetable. `timetable:override` is
+admin-only: it is the escape hatch that can break a generated schedule.
+
+### Timetable publication lifecycle
+
+A generated timetable is a **draft** until somebody with `timetable:publish`
+publishes it, and stays **published** until somebody with `timetable:approve`
+signs it off. The states are derived from timestamps, so the UI cannot disagree
+with the server, and `GET /timetable/class/:class_id` returns the state
+alongside the entries.
+
+Three rules:
+
+- **Publishing requires at least one entry.** An empty timetable cannot be
+  published, because a published state with nothing behind it looks approved.
+- **Approval requires publication first**, so the trail always has publish
+  before approve. Combined with the split permissions, the person who prepares a
+  schedule does not automatically sign it off.
+- **Regenerating clears both timestamps.** The new draft is a different document
+  from the one that was approved, and a stale "approved" badge on a freshly
+  generated schedule is a real-world problem.
+
+### Exams — `/api/protected/exams/*`
+
+Gated by `RequireInstitutionWorkspace`, then `DenySupportSession`.
+
+| Endpoint | Permission | `user` | `academic_coord` | `exam_coord` | `admin` | `super_admin` |
+|---|---|---|---|---|---|---|
+| `GET /exams`, `GET /exams/:id` | `exam:read` | ❌ | ❌ | ✅ | ✅ | — |
+| `POST /exams`, `PUT|PATCH /exams/:id` | `exam:write` | ❌ | ❌ | ✅ | ✅ | — |
+| `DELETE /exams/:id` | `exam:write` | ❌ | ❌ | ✅ | ✅ | — |
+| `POST /exams/:id/status/scheduled` | `exam:schedule` | ❌ | ❌ | ✅ | ✅ | — |
+| `POST /exams/:id/status/published` | `exam:publish` | ❌ | ❌ | ✅ | ✅ | — |
+| `POST /exams/:id/status/approved` | `exam:approve` | ❌ | ❌ | ❌ | ✅ | — |
+
+An academic coordinator holds **no** exam permission at all, which is what keeps
+the two coordinators' domains genuinely separate.
+
+Every referenced record — course, module, class, room, invigilator — must belong
+to the caller's own institution, checked in the controller. A cross-tenant
+reference would both leak another campus's data in the response and let an exam be
+scheduled somewhere impossible. Room and invigilator clashes return `409` with the
+conflicting exams listed.
+
+Exam statuses move **one stage at a time** (`draft → scheduled → published →
+approved`). A draft cannot jump to approved, because scheduling and publishing
+are real steps that then did not happen. Backwards is a single withdraw to draft;
+`approved` is terminal. Publishing and approving both require a room and an
+invigilator to be set.
+
+### CSV import — `/api/protected/import/*`
+
+Gated by `RequireInstitutionWorkspace`, then `DenySupportSession`.
+
+| Endpoint | Permission | `user` | `academic_coord` | `exam_coord` | `admin` |
+|---|---|---|---|---|---|
+| `GET /import/schema` | `data:import` | ❌ | ✅ | ❌ | ✅ |
+| `POST /import/:entity/validate` | `data:import` | ❌ | ✅ | ❌ | ✅ |
+| `POST /import/:entity` | `data:import` | ❌ | ✅ | ❌ | ✅ |
+
+Bulk import is coordinator-and-admin work: it is how a curriculum gets loaded,
+which is the academic coordinator's job, and an institution admin's to
+oversee. It is refused outright for a support session rather than read-only,
+because it writes in bulk.
 
 ### Institution administration
 
@@ -187,6 +250,13 @@ gain read access to an arbitrary institution.
 revoked server-side, so a session with a start and no end is how an abandoned
 session is spotted in the trail.
 
+A support session is refused by `DenySupportSession` on the exams and import
+groups, and by `DenyWriteForSupport` on the timetable group — it may browse but
+never change. These are method-based guards, not permission checks, so they hold
+even if the support role is later granted a write permission by mistake. The
+read allowance is stated positively, via `support:read`, rather than assumed from
+the absence of write permissions.
+
 **Known limitation:** `IM_PERSONATION_MAX_CONCURRENT` is counted in-process, so
 the cap is per API instance. A multi-instance deployment should move it to shared
 state; until then the cap errs toward *allowing* a session rather than locking an
@@ -218,7 +288,8 @@ answer "who changed this, and when".
 `institution.create`, `institution.update`, `institution.suspend`,
 `institution.delete`, `institution.plan_change`, `impersonate.start`,
 `impersonate.end`, `timetable.generate`, `timetable.publish`,
-`timetable.approve`, `exam.publish`, `exam.approve`, `data.import`.
+`timetable.approve`, `exam.create`, `exam.update`, `exam.delete`,
+`exam.schedule`, `exam.publish`, `exam.approve`, `data.import`.
 
 `role.change` records the **before and after** pair, so "who was promoted to
 what" is a direct query rather than an inference.

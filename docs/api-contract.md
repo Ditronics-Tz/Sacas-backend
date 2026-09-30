@@ -170,6 +170,153 @@ impersonation or escalation attempts is visible. The trail is append-only.
 
 ---
 
+## Timetable publication, exams, and CSV import
+
+These are the surfaces behind the `timetable:publish`, `timetable:approve`,
+`exam:*`, and `data:import` permissions. Previously those permissions were
+granted but had no endpoint, so `/me/permissions` advertised capabilities that
+404'd; they are now real.
+
+### Timetable lifecycle
+
+`GET /api/protected/timetable/class/:class_id` returns the entries **plus** the
+derived state, so the UI does not compute it and cannot disagree with the server:
+
+```json
+{
+  "timetables": [ /* … */ ],
+  "class_id": 4,
+  "state": "approved",
+  "published_at": "2026-09-30T14:00:00Z",
+  "approved_at": "2026-09-30T16:30:00Z"
+}
+```
+
+`state` is one of `empty`, `draft`, `published`, `approved`.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| `POST` | `/timetable/class/:class_id/publish` | `timetable:publish` | Requires ≥1 entry. |
+| `POST` | `/timetable/class/:class_id/approve` | `timetable:approve` | Requires published first. |
+
+Body is optional: `{ "note": "…" }`.
+
+Publishing an empty timetable returns `400` — a published state with nothing
+behind it looks approved to the UI. Approving an unpublished one returns `400`
+saying so. **Regenerating clears both timestamps**, so a freshly generated draft
+never keeps a stale "approved" badge.
+
+### Exams — `/api/protected/exams`
+
+| Method | Path | Permission |
+|---|---|---|
+| `GET` | `` / `/:id` | `exam:read` |
+| `POST` | `` | `exam:write` |
+| `PUT` `PATCH` | `/:id` | `exam:write` |
+| `DELETE` | `/:id` | `exam:write` |
+| `POST` | `/:id/status/scheduled` | `exam:schedule` |
+| `POST` | `/:id/status/published` | `exam:publish` |
+| `POST` | `/:id/status/approved` | `exam:approve` |
+
+```json
+{
+  "title": "Final Examination — Algorithms",
+  "type": "final",
+  "course_id": 3,
+  "module_id": 12,
+  "class_ids": [4, 5],
+  "exam_date": "2026-11-02",
+  "start_time": "09:00",
+  "end_time": "11:00",
+  "room_id": 7,
+  "invigilator_id": 19,
+  "max_marks": 100,
+  "notes": "Two calculators permitted"
+}
+```
+
+`type`: `midterm` | `final` | `quiz` | `practical` | `supplement`.
+`exam_date` must be a real `YYYY-MM-DD`; `2026-02-30` is rejected, because an
+exam on a day that never happens is a real-world failure. `end_time` must be
+after `start_time`.
+
+**Every reference must be in the caller's own institution** — course, module,
+classes, room, and invigilator are all checked, and a cross-tenant one returns
+`400`. This matters for two reasons: the response would otherwise carry another
+campus's data, and the exam would be scheduled somewhere impossible.
+
+Room and invigilator clashes return `409` with the conflicting exams listed.
+`GET` supports `?course_id=`, `?status=`, `limit`, `offset`.
+
+Statuses move **one stage at a time**: `draft → scheduled → published →
+approved`. A draft cannot jump to approved, because scheduling and publishing are
+real steps that then did not happen. The only backwards move is a single withdraw
+to draft; `approved` is terminal and an approved exam cannot be edited (`409` —
+create a supplementary exam instead). Publishing and approving both require a
+room and an invigilator to be set, so an unscheduled exam cannot be approved.
+
+Editing a published exam's logistics drops it back to `scheduled` and clears the
+publication, because a published exam whose room changed underneath students is
+a real problem.
+
+### CSV import — `/api/protected/import`
+
+| Method | Path | Permission |
+|---|---|---|
+| `GET` | `/import/schema` | `data:import` |
+| `POST` | `/import/:entity/validate` | `data:import` |
+| `POST` | `/import/:entity` | `data:import` |
+
+`entity` is one of `faculty`, `course`, `module`, `class`, `room`, `subject`,
+`staff` — loaded in that order, since each references the ones before it.
+
+`GET /import/schema?entity=staff` returns the accepted columns. Headers are
+normalised, so `Credit Hours` is accepted for `credit_hours` and a spreadsheet
+exported from a richer system still imports. Extra columns are ignored.
+
+**The flow is two-step, on purpose.** `validate` parses and reports every problem
+with its row number, and writes nothing. `import` re-validates and then commits.
+A one-shot import would either half-succeed on a bad file or silently skip rows,
+and a half-imported roster of 397 lecturers out of 400 is worse than a failed one,
+because the operator cannot tell which 397 arrived.
+
+```json
+POST /import/staff/validate
+→ 200 { "valid": false,
+       "result": { "entity": "staff", "columns": ["name","email","faculty_name","max_hours"],
+                   "valid": 1, "invalid": 1,
+                   "errors": [ { "row": 3, "field": "email", "message": "is not a valid email address" },
+                               { "row": 3, "field": "max_hours", "message": "must be between 1 and 60" } ] },
+       "next": { "if_valid": "POST /api/protected/import/staff to commit this file", "rows": 1 } }
+```
+
+Row numbers match the spreadsheet: the header is row 1, so the first data row is
+row 2. Every problem in a row is reported, not just the first, so one upload
+tells the operator everything to fix.
+
+Committing a file with errors returns `422` and imports **nothing**. A row naming
+a parent that does not exist (`ErrImportUnknownReference`, e.g. a course whose
+`faculty_name` matches nothing) returns `422` with a hint to import the parents
+first — and the transaction has rolled back, so nothing landed.
+
+```json
+POST /import/staff
+→ 201 { "message": "Imported 2 staff record(s)",
+       "outcome": { "entity": "staff", "created": 2, "skipped": 1,
+                    "skipped_rows": [ { "row": 4, "message": "skipped: a matching record already exists in this institution" } ],
+                    "duration_ms": 24 } }
+```
+
+Rows that would duplicate an existing record are **skipped and reported**, not
+silently dropped, so re-running a corrected file is safe and visible. The whole
+import is one transaction.
+
+Limits: 5000 rows and 5 MiB per file, both checked before parsing. Ragged rows
+and blank spreadsheet lines are handled gracefully — a ragged row is a row error,
+not a file failure.
+
+---
+
 ## Institution onboarding and members
 
 ### The decisions behind this section

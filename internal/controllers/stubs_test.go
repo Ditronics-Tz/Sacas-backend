@@ -3,6 +3,7 @@ package controllers
 import (
 	"encoding/json"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 
@@ -237,15 +238,28 @@ func (r *stubCourseRepo) GetWithModules(institutionID, id uint) (*models.Course,
 type stubClassRepo struct {
 	items  map[uint]*models.Class
 	nextID uint
+	// timetableCount lets a test pretend a class has entries, so the publish
+	// flow (which refuses an empty timetable) can be exercised.
+	timetableCount map[uint]int
 }
 
 func newStubClassRepo() *stubClassRepo {
-	return &stubClassRepo{items: map[uint]*models.Class{}, nextID: 1}
+	return &stubClassRepo{
+		items:          map[uint]*models.Class{},
+		nextID:         1,
+		timetableCount: map[uint]int{},
+	}
 }
 
 func (r *stubClassRepo) seed(c *models.Class) *models.Class {
-	c.ID = r.nextID
-	r.nextID++
+	// Respect an explicit ID so a test can pin cross-tenant IDs, and keep
+	// nextID ahead of it.
+	if c.ID == 0 {
+		c.ID = r.nextID
+	}
+	if c.ID >= r.nextID {
+		r.nextID = c.ID + 1
+	}
 	cp := *c
 	r.items[c.ID] = &cp
 	return &cp
@@ -316,6 +330,62 @@ func (r *stubClassRepo) GetByYear(institutionID uint, year int, limit, offset in
 		}
 	}
 	return scopedPage(out, limit, offset), nil
+}
+
+// CountTimetableEntries reports how many timetable entries the stub pretends a
+// class has, so the publish flow can be exercised without a timetable
+// repository. Seed it via timetableCount.
+func (r *stubClassRepo) CountTimetableEntries(institutionID, classID uint) (int64, error) {
+	c, ok := r.items[classID]
+	if !ok || !visibleTo(c.InstitutionID, institutionID) {
+		return 0, gorm.ErrRecordNotFound
+	}
+	return int64(r.timetableCount[classID]), nil
+}
+
+func (r *stubClassRepo) MarkPublished(institutionID, classID, userID uint, at time.Time) (bool, error) {
+	c, ok := r.items[classID]
+	if !ok || !visibleTo(c.InstitutionID, institutionID) {
+		return false, gorm.ErrRecordNotFound
+	}
+	if r.timetableCount[classID] == 0 {
+		return false, nil
+	}
+	cp := *c
+	cp.PublishedAt = &at
+	cp.PublishedByID = &userID
+	r.items[classID] = &cp
+	return true, nil
+}
+
+func (r *stubClassRepo) MarkApproved(institutionID, classID, userID uint, at time.Time) (bool, error) {
+	c, ok := r.items[classID]
+	if !ok || !visibleTo(c.InstitutionID, institutionID) {
+		return false, gorm.ErrRecordNotFound
+	}
+	// Approval requires publication, matching the real repository.
+	if c.PublishedAt == nil {
+		return false, nil
+	}
+	cp := *c
+	cp.ApprovedAt = &at
+	cp.ApprovedByID = &userID
+	r.items[classID] = &cp
+	return true, nil
+}
+
+func (r *stubClassRepo) ClearPublication(institutionID, classID uint) error {
+	c, ok := r.items[classID]
+	if !ok || !visibleTo(c.InstitutionID, institutionID) {
+		return gorm.ErrRecordNotFound
+	}
+	cp := *c
+	cp.PublishedAt = nil
+	cp.PublishedByID = nil
+	cp.ApprovedAt = nil
+	cp.ApprovedByID = nil
+	r.items[classID] = &cp
+	return nil
 }
 
 // --- Room --------------------------------------------------------------------

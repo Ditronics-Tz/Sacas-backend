@@ -57,6 +57,79 @@ func RequireAnyPermission(permissions ...auth.Permission) gin.HandlerFunc {
 	}
 }
 
+// DenySupportSession refuses the request outright when it is authenticated with
+// a support (impersonation) token.
+//
+// A support session is read-only because the support role holds no write
+// permission, so the permission checks already stop it. This is the second,
+// independent layer: if a future edit ever grants the support role a write
+// permission by accident, this still blocks it. The capability model should not
+// be the only thing standing between a support session and a write, because the
+// capability model is exactly the thing a future edit is most likely to change.
+func DenySupportSession() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if IsSupportRequest(c) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "A support session is read-only",
+				"details": "It cannot create, modify, or delete anything.",
+			})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
+// DenyWriteForSupport refuses any mutating request made with a support token,
+// while allowing reads through.
+//
+// The allowance is stated positively rather than assumed: a support session is
+// admitted only because it holds support:read, so if that permission were ever
+// removed the session would have no read path either. That makes the support
+// role's capability set self-describing instead of relying on the absence of
+// write permissions, which is a much easier thing for a future edit to disturb.
+//
+// Timetable browsing is the whole point of a support session, so this is the
+// read/write-aware counterpart to DenySupportSession: the GETs pass and the
+// POST/PUT/PATCH/DELETEs are refused. Method-based rather than
+// permission-based on purpose — it holds even if the support role is later given
+// a write permission by mistake.
+func DenyWriteForSupport() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !IsSupportRequest(c) {
+			c.Next()
+			return
+		}
+		if isSafeMethod(c.Request.Method) {
+			role, ok := callerRole(c)
+			if ok && auth.HasPermission(role, auth.PermSupportRead) {
+				c.Next()
+				return
+			}
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "This support session has no read access",
+			})
+			c.Abort()
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "A support session is read-only",
+			"details": "It can browse this timetable but cannot change it.",
+		})
+		c.Abort()
+	}
+}
+
+// isSafeMethod reports whether an HTTP method does not change state.
+func isSafeMethod(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	default:
+		return false
+	}
+}
+
 // RequireInstitutionWorkspace rejects a caller that is not bound to an
 // institution.
 //
@@ -124,6 +197,13 @@ func RequirePlatformWorkspace() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+// CallerRole returns the caller's role as it was resolved from the database.
+// Exported for the audit trail and the support middleware, which need to
+// distinguish a support session from a real account.
+func CallerRole(c *gin.Context) (models.UserRole, bool) {
+	return callerRole(c)
 }
 
 // callerRole returns the caller's role as it was resolved from the database.

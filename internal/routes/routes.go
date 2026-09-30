@@ -36,6 +36,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	roomRepo := repositories.NewRoomRepository(db)
 	subjectRepo := repositories.NewSubjectRepository(db)
 	timetableRepo := repositories.NewTimetableRepository(db)
+	examRepo := repositories.NewExamRepository(db)
 	generationSettingsRepo := repositories.NewGenerationSettingsRepository(db)
 	institutionRepo := repositories.NewInstitutionRepository(db)
 	auditLogRepo := repositories.NewAuditLogRepository(db)
@@ -97,6 +98,12 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 		institutionRepo, userRepo, staffRepo, invitationRepo, invitationService, auditRecorder)
 	superAdminUserController := controllers.NewSuperAdminUserController(
 		userRepo, institutionRepo, notificationService, auditRecorder)
+	examController := controllers.NewExamController(
+		examRepo, courseRepo, moduleRepo, classRepo, roomRepo, staffRepo, auditRecorder)
+	importer := services.NewImporter(
+		db, auditRecorder, facultyRepo, courseRepo, moduleRepo, classRepo,
+		roomRepo, subjectRepo, staffRepo)
+	importController := controllers.NewImportController(importer)
 
 	// Security middleware
 	securityConfig := middlewares.DefaultSecurityConfig()
@@ -558,6 +565,10 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 			// so widening a role is a change to internal/auth alone.
 			timetable := protected.Group("/timetable")
 			timetable.Use(middlewares.RequireInstitutionWorkspace())
+			// A support session may browse the timetable but never write to it.
+			// The write permissions already exclude it; this is the independent
+			// second layer.
+			timetable.Use(middlewares.DenyWriteForSupport())
 			{
 				// Faculty
 				timetable.POST("/faculties", middlewares.RequirePermission(auth.PermFacultyWrite), facultyController.CreateFaculty)
@@ -628,6 +639,64 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				timetable.GET("/:id", middlewares.RequirePermission(auth.PermTimetableRead), timetableController.GetTimetable)
 				timetable.PUT("/:id", middlewares.RequirePermission(auth.PermTimetableOverride), timetableController.UpdateTimetable)
 				timetable.DELETE("/:id", middlewares.RequirePermission(auth.PermTimetableOverride), timetableController.DeleteTimetable)
+
+				// Publication lifecycle. Publish and approve are separate
+				// permissions on purpose: the person who prepares a schedule
+				// should not automatically be the person who signs it off.
+				// Approval also requires the timetable to be published first, so
+				// the two events are always in that order in the audit trail.
+				timetable.POST("/class/:class_id/publish",
+					middlewares.RequirePermission(auth.PermTimetablePublish),
+					timetableController.PublishClass)
+				timetable.POST("/class/:class_id/approve",
+					middlewares.RequirePermission(auth.PermTimetableApprove),
+					timetableController.ApproveClass)
+			}
+
+			// --- Exams -------------------------------------------------------
+			// An institution workspace, so a platform account is refused. An
+			// academic coordinator holds no exam permission at all, which keeps
+			// the two coordinators' domains genuinely separate.
+			exams := protected.Group("/exams")
+			exams.Use(middlewares.RequireInstitutionWorkspace())
+			// Defence in depth: the exam write permissions are already absent
+			// from the support role, and this refuses a support session outright
+			// so a future permission edit cannot open a write path for one.
+			exams.Use(middlewares.DenySupportSession())
+			{
+				exams.GET("", middlewares.RequirePermission(auth.PermExamRead), examController.GetAll)
+				exams.POST("", middlewares.RequirePermission(auth.PermExamWrite), examController.Create)
+				exams.GET("/:id", middlewares.RequirePermission(auth.PermExamRead), examController.Get)
+				exams.PUT("/:id", middlewares.RequirePermission(auth.PermExamWrite), examController.Update)
+				exams.PATCH("/:id", middlewares.RequirePermission(auth.PermExamWrite), examController.Update)
+				exams.DELETE("/:id", middlewares.RequirePermission(auth.PermExamWrite), examController.Delete)
+
+				// The three lifecycle transitions, each behind its own permission
+				// so scheduling, publishing, and approving can be delegated
+				// separately.
+				exams.POST("/:id/status/scheduled",
+					middlewares.RequirePermission(auth.PermExamSchedule), examController.SetStatus)
+				exams.POST("/:id/status/published",
+					middlewares.RequirePermission(auth.PermExamPublish), examController.SetStatus)
+				exams.POST("/:id/status/approved",
+					middlewares.RequirePermission(auth.PermExamApprove), examController.SetStatus)
+			}
+
+			// --- CSV bulk import --------------------------------------------
+			// Validate and commit are separate endpoints so an operator sees
+			// every problem with a file before any of it is written; a
+			// one-shot import would either half-succeed or silently skip rows.
+			imports := protected.Group("/import")
+			imports.Use(middlewares.RequireInstitutionWorkspace())
+			// An import writes in bulk, so a support session is refused outright
+			// rather than relying on the data:import permission alone.
+			imports.Use(middlewares.DenySupportSession())
+			{
+				imports.GET("/schema", middlewares.RequirePermission(auth.PermDataImport), importController.Schema)
+				imports.POST("/:entity/validate",
+					middlewares.RequirePermission(auth.PermDataImport), importController.Validate)
+				imports.POST("/:entity",
+					middlewares.RequirePermission(auth.PermDataImport), importController.Import)
 			}
 		}
 	}

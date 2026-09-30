@@ -3,6 +3,7 @@ package services
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -49,6 +50,25 @@ func (s *stubClassRepo) GetByCourse(institutionID, courseID uint, limit, offset 
 func (s *stubClassRepo) GetByYear(institutionID uint, year int, limit, offset int) ([]models.Class, error) {
 	return nil, nil
 }
+
+// CountTimetableEntries is not exercised by the solver engine; the value is
+// fixed so the publish-related methods are inert here.
+func (s *stubClassRepo) CountTimetableEntries(institutionID, classID uint) (int64, error) {
+	if s.class == nil || !repositories.InTenant(s.class.InstitutionID, institutionID) {
+		return 0, gorm.ErrRecordNotFound
+	}
+	return 0, nil
+}
+
+func (s *stubClassRepo) MarkPublished(institutionID, classID, userID uint, at time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *stubClassRepo) MarkApproved(institutionID, classID, userID uint, at time.Time) (bool, error) {
+	return false, nil
+}
+
+func (s *stubClassRepo) ClearPublication(institutionID, classID uint) error { return nil }
 
 type stubModuleRepo struct {
 	// byCourse is keyed by course ID and holds modules belonging to that course.

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -192,7 +193,19 @@ func (c *TimetableController) GetTimetableByClass(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{"timetables": timetables})
+	// Include the publication state so the frontend can show a draft/pending
+	// badge without a second call, and can hide an unapproved timetable from a
+	// student-facing view.
+	response := gin.H{"timetables": timetables}
+	if classRepo := c.classRepo; classRepo != nil {
+		if class, err := classRepo.GetByID(inst, classID); err == nil {
+			response["class_id"] = classID
+			response["state"] = string(class.TimetableState(len(timetables) > 0))
+			response["published_at"] = class.PublishedAt
+			response["approved_at"] = class.ApprovedAt
+		}
+	}
+	ctx.JSON(http.StatusOK, response)
 }
 
 func (c *TimetableController) GetTimetableByStaff(ctx *gin.Context) {
@@ -422,15 +435,28 @@ func (c *TimetableController) GenerateTimetable(ctx *gin.Context) {
 		return
 	}
 
+	// Regeneration replaces the whole timetable, so any prior publication and
+	// approval no longer describe it. Clearing them is what stops an approved
+	// badge from sitting on a freshly generated, unreviewed schedule.
+	if c.classRepo != nil {
+		if err := c.classRepo.ClearPublication(inst, req.ClassID); err != nil {
+			// Not fatal: the timetable itself was replaced, and the stale
+			// timestamps are corrected on the next publish. Log rather than fail
+			// the whole generation.
+			logger.Warn("Failed to clear publication state for class %d: %v", req.ClassID, err)
+		}
+	}
+
 	logger.Info("Timetable generated for class %d: %d entries via %s", req.ClassID, len(result.Timetables), result.Engine)
 	// Generation replaces a class's whole timetable, so it is worth a trail
 	// entry: it answers "who regenerated this class's schedule, and when".
 	c.audit.Record(ctx, models.AuditTimetableGenerate, "class", uintString(req.ClassID), "",
 		map[string]any{
-			"engine":             result.Engine,
-			"status":             result.Status,
-			"scheduled_sessions": len(result.Timetables),
-			"required_sessions":  result.RequiredSessions,
+			"engine":              result.Engine,
+			"status":              result.Status,
+			"scheduled_sessions":  len(result.Timetables),
+			"required_sessions":   result.RequiredSessions,
+			"cleared_publication": true,
 		})
 	ctx.JSON(http.StatusOK, gin.H{
 		"message":                   "Timetable generated successfully (replaced previous class slots)",
@@ -488,6 +514,122 @@ func (c *TimetableController) PreviewGenerateTimetable(ctx *gin.Context) {
 	})
 }
 
+// publishClassRequest is the body for publish/approve. It is empty today, but
+// the endpoints are versioned shapes the frontend will call, and a note field
+// costs nothing to accept now.
+type publishClassRequest struct {
+	Note string `json:"note,omitempty"`
+}
+
+// PublishClass handles POST /api/protected/timetable/class/:class_id/publish.
+//
+// Publishing says "this generated draft is the real timetable". It requires at
+// least one entry: publishing an empty timetable would create a state that
+// looks approved to the UI while showing nothing.
+func (c *TimetableController) PublishClass(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
+	classID, err := parseIDParam(ctx, "class_id")
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid class ID"})
+		return
+	}
+	if err := c.classInInstitution(inst, classID); err != nil {
+		respondNotFound(ctx, "Class not found")
+		return
+	}
+
+	var req publishClassRequest
+	_ = ctx.ShouldBindJSON(&req) // optional
+
+	entries, err := c.classRepo.CountTimetableEntries(inst, classID)
+	if err != nil {
+		logger.Error("Failed to count timetable entries for class %d: %v", classID, err)
+		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to publish timetable"})
+		return
+	}
+	if entries == 0 {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error":   "This class has no timetable to publish",
+			"details": "Generate a timetable first.",
+		})
+		return
+	}
+
+	userID, _ := currentUserID(ctx)
+	ok, err := c.classRepo.MarkPublished(inst, classID, userID, timeNow())
+	if err != nil || !ok {
+		if err != nil {
+			logger.Error("Failed to publish timetable for class %d: %v", classID, err)
+		}
+		respondRepoError(ctx, "Class not found", err)
+		return
+	}
+
+	c.audit.Record(ctx, models.AuditTimetablePublish, "class", uintString(classID), "",
+		map[string]any{"entries": entries, "note": req.Note})
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"message":  "Timetable published",
+		"class_id": classID,
+		"state":    string(models.TimetablePublished),
+	})
+}
+
+// ApproveClass handles POST /api/protected/timetable/class/:class_id/approve.
+//
+// Approval is a separate permission from publication on purpose: the common
+// governance requirement is that whoever prepared a schedule does not sign it
+// off. This endpoint requires the timetable to be published first, so the two
+// events are always in order in the trail.
+func (c *TimetableController) ApproveClass(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
+	classID, err := parseIDParam(ctx, "class_id")
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid class ID"})
+		return
+	}
+	if err := c.classInInstitution(inst, classID); err != nil {
+		respondNotFound(ctx, "Class not found")
+		return
+	}
+
+	var req publishClassRequest
+	_ = ctx.ShouldBindJSON(&req) // optional
+
+	userID, _ := currentUserID(ctx)
+	ok, err := c.classRepo.MarkApproved(inst, classID, userID, timeNow())
+	if err != nil {
+		logger.Error("Failed to approve timetable for class %d: %v", classID, err)
+		respondRepoError(ctx, "Class not found", err)
+		return
+	}
+	if !ok {
+		// The class is in this institution (checked above), so a false here means
+		// the timetable has not been published. Say so, because "approve
+		// silently did nothing" is a confusing outcome.
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"error":   "This timetable has not been published yet",
+			"details": "Publish it before approving it.",
+		})
+		return
+	}
+
+	c.audit.Record(ctx, models.AuditTimetableApprove, "class", uintString(classID), "",
+		map[string]any{"note": req.Note})
+
+	ctx.JSON(http.StatusOK, gin.H{
+		"message":  "Timetable approved",
+		"class_id": classID,
+		"state":    string(models.TimetableApproved),
+	})
+}
+
 func (c *TimetableController) ValidateTimetable(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"message": "Use POST create/update for slot validation; conflicts return 409"})
 }
+
+// timeNow returns the current UTC time, in one place so the publish/approve
+// timestamps are recorded consistently.
+func timeNow() time.Time { return time.Now().UTC() }

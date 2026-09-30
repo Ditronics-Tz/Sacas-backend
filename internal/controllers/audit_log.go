@@ -213,6 +213,8 @@ var allAuditActions = []models.AuditAction{
 	models.AuditInstitutionPlanChange,
 	models.AuditImpersonateStart, models.AuditImpersonateEnd,
 	models.AuditTimetableGenerate, models.AuditTimetablePublish,
-	models.AuditTimetableApprove, models.AuditExamPublish, models.AuditExamApprove,
+	models.AuditTimetableApprove,
+	models.AuditExamCreate, models.AuditExamUpdate, models.AuditExamDelete,
+	models.AuditExamSchedule, models.AuditExamPublish, models.AuditExamApprove,
 	models.AuditDataImport,
 }
