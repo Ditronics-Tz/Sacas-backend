@@ -67,6 +67,24 @@ func ValidateProductionConfig() error {
 		errs = append(errs, "no SMS provider configured when ENV=production (set TWILIO_* or BEEM_* , or SMS_PROVIDER=none to explicitly disable)")
 	}
 
+	// Captcha: if it is switched on, it must actually be configured. Without
+	// this check "CAPTCHA_ENABLED=true" with a missing secret would silently
+	// degrade to "no captcha", which is the opposite of what the operator asked
+	// for and the opposite of the fail-closed behaviour the captcha service
+	// itself implements.
+	//
+	// It is NOT required to be on: a self-hosted deployment may put its own
+	// front-door protection in place, and forcing it would break that. The
+	// signup endpoints are rate limited either way.
+	if strings.EqualFold(GetEnv("CAPTCHA_ENABLED", "false"), "true") {
+		if GetEnv("CAPTCHA_SECRET", "") == "" {
+			errs = append(errs, "CAPTCHA_SECRET is required when CAPTCHA_ENABLED=true in production")
+		}
+		if GetEnv("CAPTCHA_VERIFY_URL", "") == "" {
+			errs = append(errs, "CAPTCHA_VERIFY_URL is required when CAPTCHA_ENABLED=true in production")
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("production config invalid:\n - %s", strings.Join(errs, "\n - "))
 	}

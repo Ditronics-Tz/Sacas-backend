@@ -22,6 +22,15 @@ type UserRepository interface {
 	// verification) where the acting user is the subject and no tenant has
 	// been resolved in the request context yet.
 	UpdateSelf(user *models.User) error
+	// SetInstitution moves a user between institutions, or makes them a
+	// platform account when institutionID is nil.
+	//
+	// It is a separate method from Update because institution_id is a privileged
+	// field: a profile update must not be able to move an account between
+	// tenants, and only the platform may do this at all. The target institution
+	// is NOT the scope — the scope is the user's CURRENT institution, so the
+	// write can only ever be applied to an account the platform can already see.
+	SetInstitution(id uint, institutionID *uint) error
 	Delete(institutionID, id uint) error
 	GetAll(institutionID uint, limit, offset int) ([]models.User, error)
 	GetByRole(institutionID uint, role string, limit, offset int) ([]models.User, error)
@@ -106,6 +115,29 @@ func (r *userRepository) UpdateSelf(user *models.User) error {
 		scope = *user.InstitutionID
 	}
 	return r.Update(scope, user)
+}
+
+// SetInstitution moves a user between institutions, or clears the institution to
+// make them a platform account.
+//
+// A NULL institution is written as SQL NULL rather than 0, because 0 is not a
+// real institution and the tenant middleware treats a NULL institution as the
+// platform scope.
+func (r *userRepository) SetInstitution(id uint, institutionID *uint) error {
+	q := r.db.Model(&models.User{}).Where("id = ?", id)
+	if institutionID == nil {
+		q = q.Update("institution_id", nil)
+	} else {
+		q = q.Update("institution_id", *institutionID)
+	}
+	res := q
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 func (r *userRepository) Delete(institutionID, id uint) error {

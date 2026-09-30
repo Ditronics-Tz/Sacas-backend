@@ -58,6 +58,29 @@ type RegisterRequest struct {
 }
 
 func (ac *AuthController) Register(c *gin.Context) {
+	// Public self-service registration is closed by default.
+	//
+	// Since the tenancy work, User.institution_id is required for every
+	// non-platform role and TenantMiddleware refuses a request with no tenant
+	// scope. A public register therefore can only ever create an account that is
+	// permanently locked out: it can verify its email, but it can never sign in,
+	// because it belongs to no institution. Leaving it open advertised a signup
+	// that could not succeed.
+	//
+	// Accounts now come from an invitation, or from registering an institution
+	// (POST /api/auth/register-institution).
+	if !PublicRegisterEnabled() {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "Self-service registration is closed",
+			"details": RegisterDisabledMessage,
+			"alternatives": []string{
+				"POST /api/auth/register-institution",
+				"POST /api/auth/accept-invitation",
+			},
+		})
+		return
+	}
+
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		logger.Warn("Invalid registration request: %v", err)
@@ -468,7 +491,7 @@ func (ac *AuthController) ResendVerificationOTP(c *gin.Context) {
 	var req struct {
 		Email string `json:"email" binding:"required,email"`
 	}
-	
+
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

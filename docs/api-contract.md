@@ -170,6 +170,177 @@ impersonation or escalation attempts is visible. The trail is append-only.
 
 ---
 
+## Institution onboarding and members
+
+### The decisions behind this section
+
+**Approval: `pending → active`, by a platform super_admin.** A new institution
+never self-activates. A public signup endpoint that mints a usable tenant for
+free is trivially automated, and approval is where the platform confirms an
+institution is real before it holds staff, rooms, and curriculum data. Onboarding
+friction is recoverable; an unvetted tenant holding data is not.
+
+**Public `POST /api/auth/register` is closed by default.** Since the tenancy
+work, `institution_id` is required for every non-platform role and a request
+with no tenant scope is refused — so a public register could only ever create an
+account that can never sign in. It returns `403` naming the alternatives.
+Re-enable with `PUBLIC_REGISTER_ENABLED=true` if you provision accounts out of
+band.
+
+### POST `/api/auth/register-institution`
+
+Public, rate limited, captcha gated. Creates a **pending** institution and its
+first administrator in **one transaction**, then sends the email verification OTP
+through the same flow `POST /api/auth/verify-email` consumes.
+
+```json
+{
+  "institution_name": "Dar es Salaam University",
+  "institution_type": "university",
+  "region": "Dar es Salaam",
+  "admin_email": "registrar@dstu.ac.tz",
+  "admin_password": "Str0ngPass!1",
+  "admin_first_name": "Amina",
+  "admin_last_name": "Juma",
+  "admin_phone": "+255212345678",
+  "captcha_token": "…"
+}
+```
+
+`201`:
+
+```json
+{
+  "message": "Institution registered. Check your email for a verification code.",
+  "institution": { "id": 2, "name": "…", "slug": "dar-es-salaam-university", "status": "pending", "type": "university" },
+  "user_id": 17,
+  "status": "pending_approval",
+  "next": "Verify your email, then wait for platform approval. …"
+}
+```
+
+`409` if the institution name (derived slug) or the admin email is taken. The
+transaction means a half-created signup cannot happen: an institution with no
+administrator is unreachable, and an administrator with no institution cannot
+sign in, so neither row is useful alone.
+
+The admin is created with role `administrator`, inactive until email
+verification. This is the one place an administrator is created without a platform
+decision, and it is safe because the institution cannot be used until approved.
+
+`institution_type`: `college` | `university` | `school` | `institute`.
+
+### POST `/api/auth/accept-invitation`
+
+Public, rate limited, captcha gated. Turns a valid invitation into an active,
+verified account bound to the inviting institution. No email verification step —
+holding the token already proves control of the address.
+
+```json
+{ "token": "…", "password": "Str0ngPass!1", "first_name": "Amina", "last_name": "Juma" }
+```
+
+`201` returns the created user. The token is **single-use and expiring**, and
+only its SHA-256 hash is stored, so it cannot be retrieved again. Not-found,
+expired, revoked, and already-used all return the same `400` so the response
+cannot be used to probe which it was.
+
+### GET / PUT `/api/protected/institution`
+
+Any institution account. The institution is the caller's own, resolved from the
+session — there is no `:id`.
+
+`PUT` changes presentation only: `name`, `region`, `phone`, `address`,
+`logo_url`, `email`. Attempting `status` or `plan` returns `403` with an
+explanation, because both are platform decisions: an institution suspending
+itself would vanish from the platform's view, and upgrading itself would let it
+grant itself paid features.
+
+### Members — `/api/protected/institution/members`
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| `GET` | `` | `user:read` | Paginated. Each row carries `staff_id`, `staff_name`, `can_manage`. |
+| `GET` | `/:id` | `user:read` | |
+| `POST` | `` | `user:write` | `role` is optional and may only be `user`. |
+| `PATCH` | `/:id` | `user:write` | Partial, including `staff_id` / `clear_staff_id`. |
+| `DELETE` | `/:id` | `user:delete` | Soft delete. The Staff record is kept. |
+
+`can_manage` tells the UI which rows to offer actions on, so it does not have to
+reimplement the role rules.
+
+Two ways to add someone, because both are real workflows:
+
+```json
+{ "email": "…", "first_name": "…", "last_name": "…", "send_invitation": true }
+```
+
+creates an **invitation** (preferred — the password never crosses the network
+twice and the institution never holds a password it did not choose). Omitting
+`send_invitation` and supplying `password` creates the account directly, which
+is still useful for bulk seeding.
+
+Guards, all returning a clear `400`: you cannot change your own role, deactivate
+your own account, or remove yourself; and you cannot demote or remove the
+institution's last administrator. Linking `staff_id` requires the staff record to
+be in **this** institution — the member is still updated and the response
+carries a `warning` if the link fails.
+
+A member of another institution returns `404`, not `403`.
+
+### Invitations — `/api/protected/institution/invitations`
+
+| Method | Path | Permission |
+|---|---|---|
+| `POST` | `` | `user:write` |
+| `GET` | `` | `user:read` |
+| `DELETE` | `/:id` | `user:write` |
+
+`POST` body: `{ "email", "role"?, "note"? }`. The response includes `token` —
+**shown once**. `status` on each row is derived from the clock, so the UI cannot
+disagree with the server about expiry. Revoking an already-accepted invitation
+returns `409`.
+
+Only the `user` role can be invited. An invitation must not become a path around
+the role restrictions that direct assignment enforces, and issuing one requires
+`user:write` (not merely role assignability), so a lecturer cannot invite.
+
+### Platform user administration — `/api/protected/superadmin/users`
+
+Platform workspace only. Unlike a tenant listing, this **includes** platform
+accounts (`institution_id` null) as well as every institution's members.
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `` | Filters: `role`, `institution_id`, `is_active`, `limit`, `offset`. |
+| `GET` | `/:id` | |
+| `PUT` | `/:id` | Including `role` and `institution_id` / `make_platform`. |
+| `POST` | `/:id/status` | `{ "is_active": false, "reason": "…" }` — suspend / reactivate. |
+| `POST` | `/:id/reset-password` | See below. |
+
+`institution_id` is written through a privileged repository method, not a
+profile update, so a tenant admin can never move an account between tenants.
+`make_platform: true` clears it. Assigning `super_admin` to an account bound to
+an institution is rejected with `400`, and `institution_support` is never
+assignable — it exists only inside a support token.
+
+Suspending the **last active platform administrator** is refused, so a mistake
+does not require database access to undo.
+
+**Password reset** generates a random password server-side and emails it; it is
+never returned in the response. Supplying `new_password` explicitly is allowed
+as a break-glass case and is recorded in the audit trail with a
+`password_in_body` marker. All resets are audited as high severity.
+
+### Platform audit trail
+
+`GET /api/protected/superadmin/audit-logs` and
+`GET /api/protected/superadmin/audit` are the same endpoint under two names, so
+either spelling works. Filters: `institution_id`, `actor_id`, `action`,
+`outcome`, `target_type`, `target_id`, `from`, `to`, `limit`, `offset`.
+
+---
+
 ## Multi-tenancy
 
 Every timetable-domain record belongs to exactly one institution. The tenant is

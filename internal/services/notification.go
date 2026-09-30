@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"html"
 	"math/big"
 	"net/http"
 	"strings"
@@ -98,10 +99,10 @@ type tanzaniaSMSProvider struct {
 func (p *tanzaniaSMSProvider) Send(toPhone, body string) error {
 	// Beem expects E.164 without leading '+'; we normalise
 	payload := map[string]interface{}{
-		"source_addr": p.sourceAddr,
+		"source_addr":   p.sourceAddr,
 		"schedule_time": "",
-		"encoding":    0,
-		"message":     body,
+		"encoding":      0,
+		"message":       body,
 		"recipients": []map[string]string{
 			{"recipient_id": "1", "dest_addr": strings.TrimPrefix(toPhone, "+")},
 		},
@@ -283,4 +284,99 @@ func (ns *NotificationService) SendSMSOTP(toPhone, otp string) error {
 func (ns *NotificationService) SendTransactionalEmail(toEmail, subject, template string, data map[string]interface{}) error {
 	// template is rendered plain/html already by caller
 	return ns.email.Send(toEmail, subject, template, template)
+}
+
+// GeneratePassword returns a cryptographically random password that satisfies
+// the shared password policy.
+//
+// Used when the platform resets a password: the secret is generated server-side
+// and emailed to the account holder, so an administrator never handles it.
+//
+// The alphabet deliberately excludes look-alike characters (no 0/O, 1/l/I) so a
+// generated password can be read aloud or copied from an email without
+// ambiguity, and the loop guarantees at least one of each required class
+// because the policy demands it.
+func GeneratePassword(length int) (string, error) {
+	if length < 12 {
+		length = 12
+	}
+	const (
+		lower  = "abcdefghijkmnopqrstuvwxyz"
+		upper  = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+		digits = "23456789"
+		all    = lower + upper + digits
+	)
+
+	out := make([]byte, 0, length)
+	// One character from each required class, so the result always satisfies
+	// the policy without a retry loop.
+	for _, class := range []string{lower, upper, digits} {
+		c, err := randomChar(class)
+		if err != nil {
+			return "", fmt.Errorf("generate password: %w", err)
+		}
+		out = append(out, c)
+	}
+	for len(out) < length {
+		c, err := randomChar(all)
+		if err != nil {
+			return "", fmt.Errorf("generate password: %w", err)
+		}
+		out = append(out, c)
+	}
+	// Shuffle, so the guaranteed characters are not always in the first
+	// positions for anyone who knows the algorithm.
+	for i := len(out) - 1; i > 0; i-- {
+		j, err := randomIndex(i + 1)
+		if err != nil {
+			return "", fmt.Errorf("shuffle password: %w", err)
+		}
+		out[i], out[j] = out[j], out[i]
+	}
+	return string(out), nil
+}
+
+// randomChar picks one byte uniformly from an alphabet.
+func randomChar(alphabet string) (byte, error) {
+	n, err := randomIndex(len(alphabet))
+	if err != nil {
+		return 0, err
+	}
+	return alphabet[n], nil
+}
+
+// randomIndex returns a uniform value in [0, n).
+//
+// crypto/rand.Int is used rather than a raw byte modulo n, because a byte mod n
+// is biased whenever n does not divide 256. That bias is irrelevant for a
+// display token but worth avoiding in a password.
+func randomIndex(n int) (int, error) {
+	if n <= 0 {
+		return 0, fmt.Errorf("random index bound must be positive, got %d", n)
+	}
+	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0, err
+	}
+	return int(v.Int64()), nil
+}
+
+// SendPasswordReset emails a platform-issued password to the account holder.
+//
+// Separate from SendEmailOTP so the copy says plainly that this is a password
+// and not a short verification code: a user who confuses the two will type a
+// six-digit code as their password and lock themselves out.
+func (ns *NotificationService) SendPasswordReset(toEmail, password string) error {
+	subject := "Your SACAS account password has been reset"
+	plain := strings.Join([]string{
+		"Your SACAS account password was reset by a platform administrator.",
+		"",
+		"New password: " + password,
+		"",
+		"If you were not expecting this, contact your institution administrator immediately.",
+	}, "\n")
+	html := "<p>Your SACAS account password was reset by a platform administrator.</p>" +
+		"<p><strong>New password:</strong> <code>" + html.EscapeString(password) + "</code></p>" +
+		"<p>If you were not expecting this, contact your institution administrator immediately.</p>"
+	return ns.email.Send(toEmail, subject, plain, html)
 }

@@ -39,6 +39,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	generationSettingsRepo := repositories.NewGenerationSettingsRepository(db)
 	institutionRepo := repositories.NewInstitutionRepository(db)
 	auditLogRepo := repositories.NewAuditLogRepository(db)
+	invitationRepo := repositories.NewInvitationRepository(db)
 
 	notificationService, err := services.NewNotificationService()
 	if err != nil {
@@ -60,6 +61,20 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	// breaking boot, and impersonation returns an explicit error.
 	impersonationService := buildImpersonationService(institutionRepo, auditRecorder)
 
+	// Onboarding: public institution registration and invitation acceptance, both
+	// of which create a database row from an unauthenticated request and are
+	// therefore captcha-gated as well as rate limited at the router.
+	onboardingService := services.NewOnboardingService(db, institutionRepo, userRepo, auditRecorder)
+	invitationService := services.NewInvitationService(
+		invitationRepo, auditRecorder, services.DefaultInvitationLimits())
+	captchaService, err := services.NewCaptchaService()
+	if err != nil {
+		// A misconfigured captcha is a production-config problem, caught by the
+		// startup guard. Panic here so it is visible at boot rather than on the
+		// first signup.
+		panic(fmt.Sprintf("captcha config: %v", err))
+	}
+
 	// Initialize controllers
 	authController := controllers.NewAuthController(userRepo, notificationService, redisClient, otpGuard)
 	userController := controllers.NewUserController(userRepo, auditRecorder)
@@ -75,6 +90,13 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	institutionController := controllers.NewInstitutionController(institutionRepo, auditRecorder)
 	auditController := controllers.NewAuditLogController(auditLogRepo, auditRecorder)
 	impersonationController := controllers.NewImpersonationController(impersonationService, auditRecorder)
+	onboardingController := controllers.NewOnboardingController(
+		onboardingService, invitationService, invitationRepo, captchaService,
+		notificationService, redisClient, otpGuard)
+	institutionWorkspaceController := controllers.NewInstitutionWorkspaceController(
+		institutionRepo, userRepo, staffRepo, invitationRepo, invitationService, auditRecorder)
+	superAdminUserController := controllers.NewSuperAdminUserController(
+		userRepo, institutionRepo, notificationService, auditRecorder)
 
 	// Security middleware
 	securityConfig := middlewares.DefaultSecurityConfig()
@@ -166,6 +188,17 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 		authRoutes := api.Group("/auth")
 		authRoutes.Use(middlewares.RateLimitMiddleware(redisClient))
 		{
+			// Public self-service registration is DISABLED by default.
+			//
+			// Since the tenancy work, User.institution_id is required for every
+			// non-platform role and TenantMiddleware refuses a request with no
+			// tenant scope, so a public register can only create an account that
+			// is permanently locked out. Accounts now arrive by invitation, or by
+			// registering an institution.
+			//
+			// The route stays registered behind a flag so a deployment with a
+			// pre-tenant migration path, or one that provisions accounts out of
+			// band, can re-enable it deliberately — see PUBLIC_REGISTER_ENABLED.
 			authRoutes.POST("/register", authController.Register)
 			authRoutes.POST("/login", authController.Login)
 			authRoutes.POST("/verify-email", authController.VerifyEmail)
@@ -181,6 +214,26 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 		{
 			otp.POST("/send", otpController.SendOTP)
 			otp.POST("/verify", otpController.VerifyOTP)
+		}
+
+		// --- Onboarding (public, rate-limited, captcha-gated) -------------
+		//
+		// Both endpoints create a database row from an unauthenticated request,
+		// so they carry a second, per-endpoint rate limit below the group limit
+		// and a captcha check inside the handler.
+		//
+		// Grouping them separately makes it easy to see, when reviewing abuse
+		// reports, exactly which unauthenticated endpoints can write.
+		onboardingRoutes := api.Group("/auth")
+		onboardingRoutes.Use(middlewares.RateLimitMiddleware(redisClient))
+		onboardingRoutes.Use(middlewares.SignupRateLimitMiddleware(redisClient))
+		{
+			// Creates a PENDING institution and its first administrator in one
+			// transaction, then sends the same verification OTP that
+			// /auth/verify-email consumes.
+			onboardingRoutes.POST("/register-institution", onboardingController.RegisterInstitution)
+			// Turns a valid invitation into an active, verified account.
+			onboardingRoutes.POST("/accept-invitation", onboardingController.AcceptInvitation)
 		}
 
 		// Protected endpoints
@@ -225,6 +278,49 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 			// which nav items and buttons to render, so that the UI and the
 			// server cannot disagree about what a role may do.
 			protected.GET("/me/permissions", userController.GetMyPermissions)
+
+			// --- The caller's own institution workspace --------------------
+			//
+			// RequireInstitutionWorkspace rejects a platform account, so this
+			// whole block is tenant-only. The institution ID is read from the
+			// session by every handler, never from a path or body.
+			workspace := protected.Group("/institution")
+			workspace.Use(middlewares.RequireInstitutionWorkspace())
+			{
+				workspace.GET("", middlewares.RequirePermission(auth.PermInstitutionRead),
+					institutionWorkspaceController.Get)
+				workspace.PUT("", middlewares.RequirePermission(auth.PermInstitutionWrite),
+					institutionWorkspaceController.Update)
+
+				// Members. Reading needs user:read; every mutation needs
+				// user:write, which only an institution administrator holds.
+				members := workspace.Group("/members")
+				{
+					members.GET("", middlewares.RequirePermission(auth.PermUserRead),
+						institutionWorkspaceController.ListMembers)
+					members.GET("/:id", middlewares.RequirePermission(auth.PermUserRead),
+						institutionWorkspaceController.GetMember)
+					members.POST("", middlewares.RequirePermission(auth.PermUserWrite),
+						institutionWorkspaceController.CreateMember)
+					members.PATCH("/:id", middlewares.RequirePermission(auth.PermUserWrite),
+						institutionWorkspaceController.PatchMember)
+					members.DELETE("/:id", middlewares.RequirePermission(auth.PermUserDelete),
+						institutionWorkspaceController.DeleteMember)
+				}
+
+				// Invitations. Issuing one is an unauthenticated path into
+				// account creation, so it requires user:write and the service
+				// enforces its own caps.
+				invitations := workspace.Group("/invitations")
+				{
+					invitations.POST("", middlewares.RequirePermission(auth.PermUserWrite),
+						institutionWorkspaceController.CreateInvitation)
+					invitations.GET("", middlewares.RequirePermission(auth.PermUserRead),
+						institutionWorkspaceController.ListInvitations)
+					invitations.DELETE("/:id", middlewares.RequirePermission(auth.PermUserWrite),
+						institutionWorkspaceController.RevokeInvitation)
+				}
+			}
 
 			// A tenant's own audit trail. Scoped to the caller's institution by
 			// the repository, so an institution sees its own history and not the
@@ -411,6 +507,40 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 						middlewares.RequirePermission(auth.PermAuditRead),
 						auditController.ListForTarget,
 					)
+				}
+
+				// The same trail under the /audit-logs name, which is what the
+				// API documentation uses. Both spellings resolve to one handler
+				// so neither becomes a second implementation to keep in step.
+				auditLogs := superadmin.Group("/audit-logs")
+				{
+					auditLogs.GET("", middlewares.RequirePermission(auth.PermAuditRead), auditController.List)
+					auditLogs.GET("/target/:type/:id",
+						middlewares.RequirePermission(auth.PermAuditRead),
+						auditController.ListForTarget,
+					)
+				}
+
+				// Platform user administration. This is the only place a
+				// non-institution role is managed; a tenant's own member list
+				// lives at /protected/institution/members.
+				//
+				// Note the permissions: user:read and admin:stats are held by
+				// institution roles too, but the RequirePlatformWorkspace gate on
+				// this group means only a platform account ever reaches them.
+				platformUsers := superadmin.Group("/users")
+				{
+					platformUsers.GET("", middlewares.RequirePermission(auth.PermUserRead),
+						superAdminUserController.ListUsers)
+					platformUsers.GET("/:id", middlewares.RequirePermission(auth.PermUserRead),
+						superAdminUserController.GetUser)
+					platformUsers.PUT("/:id", middlewares.RequirePermission(auth.PermUserRoleWrite),
+						superAdminUserController.UpdateUser)
+					platformUsers.POST("/:id/status", middlewares.RequirePermission(auth.PermUserWrite),
+						superAdminUserController.SetUserStatus)
+					platformUsers.POST("/:id/reset-password",
+						middlewares.RequirePermission(auth.PermUserRoleWrite),
+						superAdminUserController.ResetPassword)
 				}
 			}
 

@@ -62,9 +62,19 @@ func (r *stubUserRepo) GetByEmail(email string) (*models.User, error) {
 	return nil, gorm.ErrRecordNotFound
 }
 
+// recordScope maps a user's institution to the scope value the repository
+// layer uses, so the stub matches repositories.TenantScope: a NULL
+// institution (a platform account) is visible only to a platform caller.
+func recordScope(u *models.User) uint {
+	if u.InstitutionID == nil {
+		return repositories.PlatformScope
+	}
+	return *u.InstitutionID
+}
+
 func (r *stubUserRepo) Update(institutionID uint, user *models.User) error {
 	existing, ok := r.users[user.ID]
-	if !ok || existing.InstitutionID == nil || !repositories.InTenant(*existing.InstitutionID, institutionID) {
+	if !ok || !repositories.InTenant(recordScope(existing), institutionID) {
 		return gorm.ErrRecordNotFound
 	}
 	cp := *user
@@ -82,9 +92,27 @@ func (r *stubUserRepo) UpdateSelf(user *models.User) error {
 	return r.Update(scope, user)
 }
 
+// SetInstitution moves the account's institution, mirroring the real repository:
+// it is the ONLY way the institution changes, and a profile update cannot do it.
+func (r *stubUserRepo) SetInstitution(id uint, institutionID *uint) error {
+	u, ok := r.users[id]
+	if !ok {
+		return gorm.ErrRecordNotFound
+	}
+	cp := *u
+	if institutionID == nil {
+		cp.InstitutionID = nil
+	} else {
+		inst := *institutionID
+		cp.InstitutionID = &inst
+	}
+	r.users[id] = &cp
+	return nil
+}
+
 func (r *stubUserRepo) Delete(institutionID, id uint) error {
 	u, ok := r.users[id]
-	if !ok || u.InstitutionID == nil || !repositories.InTenant(*u.InstitutionID, institutionID) {
+	if !ok || !repositories.InTenant(recordScope(u), institutionID) {
 		return gorm.ErrRecordNotFound
 	}
 	delete(r.users, id)
@@ -137,7 +165,7 @@ func (r *stubUserRepo) UpdatePassword(id uint, hashed string) error {
 
 func (r *stubUserRepo) UpdateRole(institutionID, id uint, role string) error {
 	u, ok := r.users[id]
-	if !ok || u.InstitutionID == nil || !repositories.InTenant(*u.InstitutionID, institutionID) {
+	if !ok || !repositories.InTenant(recordScope(u), institutionID) {
 		return gorm.ErrRecordNotFound
 	}
 	cp := *u
@@ -156,7 +184,7 @@ func (r *stubUserRepo) DeactivateUser(institutionID, id uint) error {
 
 func (r *stubUserRepo) setActive(institutionID, id uint, active bool) error {
 	u, ok := r.users[id]
-	if !ok || u.InstitutionID == nil || !repositories.InTenant(*u.InstitutionID, institutionID) {
+	if !ok || !repositories.InTenant(recordScope(u), institutionID) {
 		return gorm.ErrRecordNotFound
 	}
 	cp := *u
