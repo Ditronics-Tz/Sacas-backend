@@ -103,7 +103,7 @@ func (r *stubInstitutionRepo) CountUsers(id uint) (int64, error) { return 0, nil
 
 func TestCreateInstitution_DefaultsToPending(t *testing.T) {
 	repo := newStubInstitutionRepo()
-	ctrl := NewInstitutionController(repo)
+	ctrl := NewInstitutionController(repo, nil)
 	r := gin.New()
 	r.POST("/institutions", ctrl.Create)
 
@@ -136,7 +136,7 @@ func TestCreateInstitution_RejectsDuplicateSlug(t *testing.T) {
 	repo := newStubInstitutionRepo()
 	repo.Create(&models.Institution{Name: "First", Slug: "first", Type: models.InstitutionTypeCollege})
 
-	ctrl := NewInstitutionController(repo)
+	ctrl := NewInstitutionController(repo, nil)
 	r := gin.New()
 	r.POST("/institutions", ctrl.Create)
 
@@ -158,7 +158,7 @@ func TestDeleteInstitution_RefusesDefault(t *testing.T) {
 		Slug: "default", Type: models.InstitutionTypeCollege,
 	})
 
-	ctrl := NewInstitutionController(repo)
+	ctrl := NewInstitutionController(repo, nil)
 	r := gin.New()
 	r.DELETE("/institutions/:id", ctrl.Delete)
 
@@ -186,7 +186,7 @@ func TestGetMe_ReturnsOwnInstitution(t *testing.T) {
 		Type: models.InstitutionTypeCollege, Status: models.InstitutionStatusActive,
 	})
 
-	ctrl := NewInstitutionController(repo)
+	ctrl := NewInstitutionController(repo, nil)
 	r := gin.New()
 	r.GET("/institution/me", withTenant(ctrl.GetMe, tenantA))
 
@@ -207,7 +207,7 @@ func TestGetMe_ReturnsOwnInstitution(t *testing.T) {
 
 func TestGetMe_PlatformAdminHasNoSingleInstitution(t *testing.T) {
 	repo := newStubInstitutionRepo()
-	ctrl := NewInstitutionController(repo)
+	ctrl := NewInstitutionController(repo, nil)
 	r := gin.New()
 	r.GET("/institution/me", withTenant(ctrl.GetMe, 0))
 

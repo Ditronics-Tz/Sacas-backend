@@ -183,7 +183,7 @@ func TestUser_CrossTenantIsolation(t *testing.T) {
 		Role: models.RoleSuperAdmin, IsActive: true, InstitutionID: nil,
 	})
 
-	ctrl := NewUserController(repo)
+	ctrl := NewUserController(repo, nil)
 	r := isolationRouter(t, func(r *gin.Engine) {
 		r.GET("/users", withTenant(ctrl.GetUsers, tenantA))
 		r.GET("/users/:id", withTenant(ctrl.GetUser, tenantA))

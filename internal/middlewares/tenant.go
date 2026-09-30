@@ -21,6 +21,12 @@ const (
 	ContextKeyRole          = "role"
 	ContextKeyEmail         = "email"
 	ContextKeyUser          = "user"
+
+	// ContextKeyTokenInstitution holds the institution named by a support-access
+	// token. It is only ever read for the support role.
+	ContextKeyTokenInstitution = "token_institution_id"
+	// ContextKeyIsSupport marks a request authenticated with a support token.
+	ContextKeyIsSupport = "is_support"
 )
 
 // PlatformScope is the InstitutionID used for platform super_admins, who are
@@ -134,14 +140,25 @@ type TenantLookup func(institutionID uint) (*models.Institution, error)
 //  4. Rejects a request that carries a tenant the user does not belong to.
 func TenantMiddleware(lookup ActiveUserLookup, institutions TenantLookup) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if lookup == nil {
-			c.Next()
-			return
-		}
 		raw, exists := c.Get(ContextKeyUserID)
 		if !exists || raw == nil {
 			// Unauthenticated: leave the context untouched and let the
 			// downstream handler decide.
+			c.Next()
+			return
+		}
+
+		// A support-access token is scoped by the institution inside the token
+		// rather than by a user row, because it is not a person. It is handled
+		// before the user lookup: there is no user to look up, and its role
+		// must survive untouched rather than being overwritten from the
+		// operator's own (super_admin) database row.
+		if IsSupportRequest(c) {
+			handleSupportRequest(c, institutions)
+			return
+		}
+
+		if lookup == nil {
 			c.Next()
 			return
 		}
@@ -232,6 +249,82 @@ func TenantMiddleware(lookup ActiveUserLookup, institutions TenantLookup) gin.Ha
 
 // nowFunc is overridable in tests.
 var nowFunc = func() time.Time { return time.Now() }
+
+// IsSupportRequest reports whether the request is authenticated with a
+// support-access token rather than a person's login token.
+func IsSupportRequest(c *gin.Context) bool {
+	v, ok := c.Get(ContextKeyIsSupport)
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && b
+}
+
+// handleSupportRequest resolves the tenant for a support-access token.
+//
+// The institution comes from the token, which the server signed, and is then
+// checked against the database so a support session cannot target an
+// institution that has since been suspended or deleted. The role stays the
+// support role, which holds read permissions only — that is what makes the
+// session read-only, and it is why the operator's own super_admin role is not
+// substituted here.
+func handleSupportRequest(c *gin.Context, institutions TenantLookup) {
+	raw, ok := c.Get(ContextKeyTokenInstitution)
+	if !ok || raw == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Support token has no institution"})
+		c.Abort()
+		return
+	}
+	var institutionID uint
+	switch v := raw.(type) {
+	case float64:
+		if v <= 0 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Support token has no institution"})
+			c.Abort()
+			return
+		}
+		institutionID = uint(v)
+	case uint:
+		institutionID = v
+	case int:
+		institutionID = uint(v)
+	case int64:
+		institutionID = uint(v)
+	default:
+		var n uint64
+		if _, err := fmt.Sscanf(fmt.Sprint(v), "%d", &n); err != nil || n == 0 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Support token has no institution"})
+			c.Abort()
+			return
+		}
+		institutionID = uint(n)
+	}
+
+	if institutions != nil {
+		inst, err := institutions(institutionID)
+		if err != nil || inst == nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Institution not found"})
+			c.Abort()
+			return
+		}
+		if !inst.IsActive(nowFunc()) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "Institution is not active",
+				"status":  inst.Status,
+				"message": institutionMessage(inst),
+			})
+			c.Abort()
+			return
+		}
+	}
+
+	// Pin the support role explicitly so a handler reading the role gets the
+	// read-only one, not anything the token might otherwise suggest.
+	c.Set(ContextKeyRole, string(models.RoleSupport))
+	SetTenant(c, institutionID, string(models.RoleSupport))
+	c.Next()
+}
 
 // institutionMessage gives an operator-facing hint about why access was denied.
 func institutionMessage(inst *models.Institution) string {

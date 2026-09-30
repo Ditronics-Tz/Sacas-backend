@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -60,6 +61,12 @@ func parsePagination(ctx *gin.Context) (limit, offset int) {
 
 // maxPageSize caps how many records a single list request may return.
 const maxPageSize = 200
+
+// parseRFC3339 parses an RFC3339 timestamp. Used by the audit filters, where
+// a date bound must be explicit rather than guessed.
+func parseRFC3339(raw string) (time.Time, error) {
+	return time.Parse(time.RFC3339, raw)
+}
 
 // respondNotFound writes the canonical cross-tenant / missing-record response.
 //

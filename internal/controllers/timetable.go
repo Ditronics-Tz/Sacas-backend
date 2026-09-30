@@ -18,6 +18,7 @@ type TimetableController struct {
 	classRepo        repositories.ClassRepository
 	roomRepo         repositories.RoomRepository
 	timetableService *services.TimetableService
+	audit            *services.AuditRecorder
 }
 
 func NewTimetableController(
@@ -26,13 +27,21 @@ func NewTimetableController(
 	classRepo repositories.ClassRepository,
 	roomRepo repositories.RoomRepository,
 	timetableService *services.TimetableService,
+	audit ...*services.AuditRecorder,
 ) *TimetableController {
+	// audit is variadic so existing call sites and tests that do not care about
+	// the trail keep working; a nil recorder is a no-op rather than a panic.
+	var recorder *services.AuditRecorder
+	if len(audit) > 0 {
+		recorder = audit[0]
+	}
 	return &TimetableController{
 		timetableRepo:    timetableRepo,
 		staffRepo:        staffRepo,
 		classRepo:        classRepo,
 		roomRepo:         roomRepo,
 		timetableService: timetableService,
+		audit:            recorder,
 	}
 }
 
@@ -414,6 +423,15 @@ func (c *TimetableController) GenerateTimetable(ctx *gin.Context) {
 	}
 
 	logger.Info("Timetable generated for class %d: %d entries via %s", req.ClassID, len(result.Timetables), result.Engine)
+	// Generation replaces a class's whole timetable, so it is worth a trail
+	// entry: it answers "who regenerated this class's schedule, and when".
+	c.audit.Record(ctx, models.AuditTimetableGenerate, "class", uintString(req.ClassID), "",
+		map[string]any{
+			"engine":             result.Engine,
+			"status":             result.Status,
+			"scheduled_sessions": len(result.Timetables),
+			"required_sessions":  result.RequiredSessions,
+		})
 	ctx.JSON(http.StatusOK, gin.H{
 		"message":                   "Timetable generated successfully (replaced previous class slots)",
 		"timetables":                result.Timetables,

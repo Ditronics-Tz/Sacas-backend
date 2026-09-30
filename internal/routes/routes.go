@@ -4,18 +4,22 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"gorm.io/gorm"
 
+	"go_boilerplate/internal/auth"
 	"go_boilerplate/internal/config"
 	"go_boilerplate/internal/controllers"
 	"go_boilerplate/internal/middlewares"
 	"go_boilerplate/internal/models"
 	"go_boilerplate/internal/repositories"
 	"go_boilerplate/internal/services"
+	"go_boilerplate/pkg/logger"
 )
 
 func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTPController, redisClient *redis.Client) {
@@ -34,6 +38,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	timetableRepo := repositories.NewTimetableRepository(db)
 	generationSettingsRepo := repositories.NewGenerationSettingsRepository(db)
 	institutionRepo := repositories.NewInstitutionRepository(db)
+	auditLogRepo := repositories.NewAuditLogRepository(db)
 
 	notificationService, err := services.NewNotificationService()
 	if err != nil {
@@ -46,9 +51,18 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	solverClient := services.NewSolverClient()
 	timetableService := services.NewTimetableService(timetableRepo, staffRepo, classRepo, moduleRepo, roomRepo, subjectRepo, solverClient, generationSettingsRepo)
 
+	// Audit trail. The recorder is passed to the controllers that perform
+	// consequential actions so they do not have to remember to call it.
+	auditRecorder := services.NewAuditRecorder(auditLogRepo)
+
+	// Support access (impersonation). The token issuer is optional: if the JWT
+	// secret cannot be resolved the feature is simply unavailable rather than
+	// breaking boot, and impersonation returns an explicit error.
+	impersonationService := buildImpersonationService(institutionRepo, auditRecorder)
+
 	// Initialize controllers
 	authController := controllers.NewAuthController(userRepo, notificationService, redisClient, otpGuard)
-	userController := controllers.NewUserController(userRepo)
+	userController := controllers.NewUserController(userRepo, auditRecorder)
 	facultyController := controllers.NewFacultyController(facultyRepo)
 	staffController := controllers.NewStaffControllerWithUser(staffRepo, moduleRepo, userRepo)
 	courseController := controllers.NewCourseController(courseRepo)
@@ -56,9 +70,11 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	classController := controllers.NewClassController(classRepo)
 	roomController := controllers.NewRoomController(roomRepo)
 	subjectController := controllers.NewSubjectController(subjectRepo)
-	timetableController := controllers.NewTimetableController(timetableRepo, staffRepo, classRepo, roomRepo, timetableService)
+	timetableController := controllers.NewTimetableController(timetableRepo, staffRepo, classRepo, roomRepo, timetableService, auditRecorder)
 	generationSettingsController := controllers.NewGenerationSettingsController(generationSettingsRepo)
-	institutionController := controllers.NewInstitutionController(institutionRepo)
+	institutionController := controllers.NewInstitutionController(institutionRepo, auditRecorder)
+	auditController := controllers.NewAuditLogController(auditLogRepo, auditRecorder)
+	impersonationController := controllers.NewImpersonationController(impersonationService, auditRecorder)
 
 	// Security middleware
 	securityConfig := middlewares.DefaultSecurityConfig()
@@ -147,16 +163,16 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 		})
 
 		// Authentication endpoints (rate-limited)
-		auth := api.Group("/auth")
-		auth.Use(middlewares.RateLimitMiddleware(redisClient))
+		authRoutes := api.Group("/auth")
+		authRoutes.Use(middlewares.RateLimitMiddleware(redisClient))
 		{
-			auth.POST("/register", authController.Register)
-			auth.POST("/login", authController.Login)
-			auth.POST("/verify-email", authController.VerifyEmail)
-			auth.POST("/forgot-password", authController.ForgotPassword)
-			auth.POST("/reset-password", authController.ResetPassword)
-			auth.POST("/resend-verification", authController.ResendVerificationOTP)
-			auth.POST("/logout", authController.Logout)
+			authRoutes.POST("/register", authController.Register)
+			authRoutes.POST("/login", authController.Login)
+			authRoutes.POST("/verify-email", authController.VerifyEmail)
+			authRoutes.POST("/forgot-password", authController.ForgotPassword)
+			authRoutes.POST("/reset-password", authController.ResetPassword)
+			authRoutes.POST("/resend-verification", authController.ResendVerificationOTP)
+			authRoutes.POST("/logout", authController.Logout)
 		}
 
 		// OTP endpoints (rate-limited)
@@ -205,22 +221,34 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 			// Registered before the admin-only /timetable group.
 			protected.GET("/timetable/my", timetableController.GetMyTimetable)
 
+			// The caller's own capabilities. The frontend reads this to decide
+			// which nav items and buttons to render, so that the UI and the
+			// server cannot disagree about what a role may do.
+			protected.GET("/me/permissions", userController.GetMyPermissions)
+
+			// A tenant's own audit trail. Scoped to the caller's institution by
+			// the repository, so an institution sees its own history and not the
+			// platform's or another tenant's.
+			protected.GET("/audit", middlewares.RequireInstitutionWorkspace(), middlewares.RequirePermission(auth.PermAdminStats), auditController.List)
+
 			users := protected.Group("/users")
 			{
-				users.GET("", middlewares.AdminMiddleware(), userController.GetUsers)
-				users.GET("/:id", middlewares.AdminMiddleware(), userController.GetUser)
-				users.POST("", middlewares.AdminMiddleware(), userController.CreateUser)
-				users.PUT("/:id", middlewares.AdminMiddleware(), userController.UpdateUser)
-				users.DELETE("/:id", middlewares.AdminMiddleware(), userController.DeleteUser)
+				users.GET("", middlewares.RequireInstitutionWorkspace(), middlewares.RequirePermission(auth.PermUserRead), userController.GetUsers)
+				users.GET("/:id", middlewares.RequireInstitutionWorkspace(), middlewares.RequirePermission(auth.PermUserRead), userController.GetUser)
+				users.POST("", middlewares.RequireInstitutionWorkspace(), middlewares.RequirePermission(auth.PermUserWrite), userController.CreateUser)
+				users.PUT("/:id", middlewares.RequireInstitutionWorkspace(), middlewares.RequirePermission(auth.PermUserWrite), userController.UpdateUser)
+				users.DELETE("/:id", middlewares.RequireInstitutionWorkspace(), middlewares.RequirePermission(auth.PermUserDelete), userController.DeleteUser)
 			}
 
+			// Admin surfaces. An institution workspace, so a platform account is
+			// refused — it has no tenant to scope these numbers to.
 			admin := protected.Group("/admin")
-			admin.Use(middlewares.AdminMiddleware())
+			admin.Use(middlewares.RequireInstitutionWorkspace())
 			{
 				// Dashboard counts are scoped to the caller's institution so one
 				// campus's admin never sees another campus's totals. A platform
 				// super_admin (institution_id NULL) gets platform-wide counts.
-				admin.GET("/dashboard", func(c *gin.Context) {
+				admin.GET("/dashboard", middlewares.RequirePermission(auth.PermAdminStats), func(c *gin.Context) {
 					inst := middlewares.InstitutionIDFromContext(c)
 
 					var faculties, courses, modules, classes, rooms, staff, timetables int64
@@ -262,7 +290,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				// User stats are scoped to the caller's institution. Users with a
 				// NULL institution_id are platform super_admins and are counted
 				// only for platform callers.
-				admin.GET("/users/stats", func(c *gin.Context) {
+				admin.GET("/users/stats", middlewares.RequirePermission(auth.PermAdminStats), func(c *gin.Context) {
 					inst := middlewares.InstitutionIDFromContext(c)
 
 					base := func() *gorm.DB {
@@ -295,8 +323,12 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				})
 			}
 
+			// Platform administration. RequirePlatformWorkspace is stronger than
+			// a role check: it also requires the account to be unbound to an
+			// institution, so a super_admin who has been assigned to an
+			// institution is a tenant user and cannot manage the tenant list.
 			superadmin := protected.Group("/superadmin")
-			superadmin.Use(middlewares.SuperAdminMiddleware())
+			superadmin.Use(middlewares.RequirePlatformWorkspace())
 			{
 				superadmin.GET("/dashboard", func(c *gin.Context) {
 					totalInstitutions, _ := institutionRepo.CountAll()
@@ -343,94 +375,175 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 				// optional per-institution overrides. A super_admin may pass
 				// ?institution_id= (or institution_id in the PUT body) to target
 				// a specific tenant's override.
-				superadmin.GET("/generation-settings", generationSettingsController.Get)
-				superadmin.PUT("/generation-settings", generationSettingsController.Update)
+				superadmin.GET("/generation-settings", middlewares.RequirePermission(auth.PermPlatformSettings), generationSettingsController.Get)
+				superadmin.PUT("/generation-settings", middlewares.RequirePermission(auth.PermPlatformSettings), generationSettingsController.Update)
 
-				// Institution management. Gated again by RequirePlatformOnly so
-				// a super_admin who HAS been assigned to an institution (and so
-				// resolved to a tenant scope) cannot manage the tenant list.
+				// Institution management. The group already requires a platform
+				// workspace, so a super_admin bound to an institution is refused
+				// here too.
 				institutions := superadmin.Group("/institutions")
-				institutions.Use(middlewares.RequirePlatformOnly())
 				{
-					institutions.POST("", institutionController.Create)
-					institutions.GET("", institutionController.GetAll)
-					institutions.GET("/:id", institutionController.Get)
-					institutions.PUT("/:id", institutionController.Update)
-					institutions.DELETE("/:id", institutionController.Delete)
+					institutions.POST("", middlewares.RequirePermission(auth.PermInstitutionWrite), institutionController.Create)
+					institutions.GET("", middlewares.RequirePermission(auth.PermInstitutionRead), institutionController.GetAll)
+					institutions.GET("/:id", middlewares.RequirePermission(auth.PermInstitutionRead), institutionController.Get)
+					institutions.PUT("/:id", middlewares.RequirePermission(auth.PermInstitutionWrite), institutionController.Update)
+					institutions.DELETE("/:id", middlewares.RequirePermission(auth.PermInstitutionDelete), institutionController.Delete)
+
+					// Support access: a read-only, short-lived, audited session
+					// scoped to one institution. This is the ONLY way a platform
+					// operator can see inside an institution's workspace.
+					institutions.POST("/:id/impersonate",
+						middlewares.RequirePermission(auth.PermImpersonate),
+						impersonationController.Start,
+					)
+					institutions.POST("/:id/impersonate/end",
+						middlewares.RequirePermission(auth.PermImpersonate),
+						impersonationController.End,
+					)
+				}
+
+				// Audit trail. Platform-wide by default; ?institution_id=N reads
+				// one tenant's trail.
+				audit := superadmin.Group("/audit")
+				{
+					audit.GET("", middlewares.RequirePermission(auth.PermAuditRead), auditController.List)
+					audit.GET("/target/:type/:id",
+						middlewares.RequirePermission(auth.PermAuditRead),
+						auditController.ListForTarget,
+					)
 				}
 			}
 
-			// Timetable Management endpoints (Admin access required)
+			// Timetable Management endpoints — an institution workspace.
+			//
+			// RequireInstitutionWorkspace rejects a platform super_admin, which
+			// is the point of the gate: a platform account is not bound to an
+			// institution, so it has no tenant to scope these queries with.
+			// Letting it through would be the cross-tenant leak the tenancy work
+			// closed. Support access is granted by explicit, audited
+			// impersonation, which does carry an institution scope and holds
+			// read permissions only.
+			//
+			// Each route then states the capability it needs rather than a role,
+			// so widening a role is a change to internal/auth alone.
 			timetable := protected.Group("/timetable")
-			timetable.Use(middlewares.AdminMiddleware())
+			timetable.Use(middlewares.RequireInstitutionWorkspace())
 			{
 				// Faculty
-				timetable.POST("/faculties", facultyController.CreateFaculty)
-				timetable.GET("/faculties", facultyController.GetAllFaculties)
-				timetable.GET("/faculties/:id", facultyController.GetFaculty)
-				timetable.PUT("/faculties/:id", facultyController.UpdateFaculty)
-				timetable.DELETE("/faculties/:id", facultyController.DeleteFaculty)
+				timetable.POST("/faculties", middlewares.RequirePermission(auth.PermFacultyWrite), facultyController.CreateFaculty)
+				timetable.GET("/faculties", middlewares.RequirePermission(auth.PermFacultyRead), facultyController.GetAllFaculties)
+				timetable.GET("/faculties/:id", middlewares.RequirePermission(auth.PermFacultyRead), facultyController.GetFaculty)
+				timetable.PUT("/faculties/:id", middlewares.RequirePermission(auth.PermFacultyWrite), facultyController.UpdateFaculty)
+				timetable.DELETE("/faculties/:id", middlewares.RequirePermission(auth.PermFacultyWrite), facultyController.DeleteFaculty)
 
 				// Course
-				timetable.POST("/courses", courseController.CreateCourse)
-				timetable.GET("/courses", courseController.GetAllCourses)
-				timetable.GET("/courses/:id", courseController.GetCourse)
-				timetable.PUT("/courses/:id", courseController.UpdateCourse)
-				timetable.DELETE("/courses/:id", courseController.DeleteCourse)
+				timetable.POST("/courses", middlewares.RequirePermission(auth.PermCourseWrite), courseController.CreateCourse)
+				timetable.GET("/courses", middlewares.RequirePermission(auth.PermCourseRead), courseController.GetAllCourses)
+				timetable.GET("/courses/:id", middlewares.RequirePermission(auth.PermCourseRead), courseController.GetCourse)
+				timetable.PUT("/courses/:id", middlewares.RequirePermission(auth.PermCourseWrite), courseController.UpdateCourse)
+				timetable.DELETE("/courses/:id", middlewares.RequirePermission(auth.PermCourseWrite), courseController.DeleteCourse)
 
 				// Module
-				timetable.POST("/modules", moduleController.CreateModule)
-				timetable.GET("/modules", moduleController.GetAllModules)
-				timetable.GET("/modules/:id", moduleController.GetModule)
-				timetable.PUT("/modules/:id", moduleController.UpdateModule)
-				timetable.DELETE("/modules/:id", moduleController.DeleteModule)
+				timetable.POST("/modules", middlewares.RequirePermission(auth.PermModuleWrite), moduleController.CreateModule)
+				timetable.GET("/modules", middlewares.RequirePermission(auth.PermModuleRead), moduleController.GetAllModules)
+				timetable.GET("/modules/:id", middlewares.RequirePermission(auth.PermModuleRead), moduleController.GetModule)
+				timetable.PUT("/modules/:id", middlewares.RequirePermission(auth.PermModuleWrite), moduleController.UpdateModule)
+				timetable.DELETE("/modules/:id", middlewares.RequirePermission(auth.PermModuleWrite), moduleController.DeleteModule)
 				// Use :id (same wildcard name as other /modules/:id routes — Gin requirement)
-				timetable.GET("/modules/:id/staff", staffController.ListModuleStaff)
+				timetable.GET("/modules/:id/staff", middlewares.RequirePermission(auth.PermStaffRead), staffController.ListModuleStaff)
 
 				// Class
-				timetable.POST("/classes", classController.CreateClass)
-				timetable.GET("/classes", classController.GetAllClasses)
-				timetable.GET("/classes/:id", classController.GetClass)
-				timetable.PUT("/classes/:id", classController.UpdateClass)
-				timetable.DELETE("/classes/:id", classController.DeleteClass)
+				timetable.POST("/classes", middlewares.RequirePermission(auth.PermClassWrite), classController.CreateClass)
+				timetable.GET("/classes", middlewares.RequirePermission(auth.PermClassRead), classController.GetAllClasses)
+				timetable.GET("/classes/:id", middlewares.RequirePermission(auth.PermClassRead), classController.GetClass)
+				timetable.PUT("/classes/:id", middlewares.RequirePermission(auth.PermClassWrite), classController.UpdateClass)
+				timetable.DELETE("/classes/:id", middlewares.RequirePermission(auth.PermClassWrite), classController.DeleteClass)
 
 				// Room
-				timetable.POST("/rooms", roomController.CreateRoom)
-				timetable.GET("/rooms", roomController.GetAllRooms)
-				timetable.GET("/rooms/:id", roomController.GetRoom)
-				timetable.PUT("/rooms/:id", roomController.UpdateRoom)
-				timetable.DELETE("/rooms/:id", roomController.DeleteRoom)
+				timetable.POST("/rooms", middlewares.RequirePermission(auth.PermRoomWrite), roomController.CreateRoom)
+				timetable.GET("/rooms", middlewares.RequirePermission(auth.PermRoomRead), roomController.GetAllRooms)
+				timetable.GET("/rooms/:id", middlewares.RequirePermission(auth.PermRoomRead), roomController.GetRoom)
+				timetable.PUT("/rooms/:id", middlewares.RequirePermission(auth.PermRoomWrite), roomController.UpdateRoom)
+				timetable.DELETE("/rooms/:id", middlewares.RequirePermission(auth.PermRoomWrite), roomController.DeleteRoom)
 
 				// Staff
-				timetable.POST("/staff", staffController.CreateStaff)
-				timetable.GET("/staff", staffController.GetAllStaff)
-				timetable.GET("/staff/:id", staffController.GetStaff)
-				timetable.PUT("/staff/:id", staffController.UpdateStaff)
-				timetable.DELETE("/staff/:id", staffController.DeleteStaff)
+				timetable.POST("/staff", middlewares.RequirePermission(auth.PermStaffWrite), staffController.CreateStaff)
+				timetable.GET("/staff", middlewares.RequirePermission(auth.PermStaffRead), staffController.GetAllStaff)
+				timetable.GET("/staff/:id", middlewares.RequirePermission(auth.PermStaffRead), staffController.GetStaff)
+				timetable.PUT("/staff/:id", middlewares.RequirePermission(auth.PermStaffWrite), staffController.UpdateStaff)
+				timetable.DELETE("/staff/:id", middlewares.RequirePermission(auth.PermStaffWrite), staffController.DeleteStaff)
 				// Gin requires the same wildcard name as /staff/:id
-				timetable.POST("/staff/:id/modules/:module_id", staffController.AssignModule)
-				timetable.DELETE("/staff/:id/modules/:module_id", staffController.UnassignModule)
-				timetable.GET("/staff/:id/modules", staffController.ListStaffModules)
+				timetable.POST("/staff/:id/modules/:module_id", middlewares.RequirePermission(auth.PermStaffWrite), staffController.AssignModule)
+				timetable.DELETE("/staff/:id/modules/:module_id", middlewares.RequirePermission(auth.PermStaffWrite), staffController.UnassignModule)
+				timetable.GET("/staff/:id/modules", middlewares.RequirePermission(auth.PermStaffRead), staffController.ListStaffModules)
 
 				// Subjects
-				timetable.POST("/subjects", subjectController.CreateSubject)
-				timetable.GET("/subjects", subjectController.GetAllSubjects)
-				timetable.GET("/subjects/:id", subjectController.GetSubject)
-				timetable.PUT("/subjects/:id", subjectController.UpdateSubject)
-				timetable.DELETE("/subjects/:id", subjectController.DeleteSubject)
+				timetable.POST("/subjects", middlewares.RequirePermission(auth.PermSubjectWrite), subjectController.CreateSubject)
+				timetable.GET("/subjects", middlewares.RequirePermission(auth.PermSubjectRead), subjectController.GetAllSubjects)
+				timetable.GET("/subjects/:id", middlewares.RequirePermission(auth.PermSubjectRead), subjectController.GetSubject)
+				timetable.PUT("/subjects/:id", middlewares.RequirePermission(auth.PermSubjectWrite), subjectController.UpdateSubject)
+				timetable.DELETE("/subjects/:id", middlewares.RequirePermission(auth.PermSubjectWrite), subjectController.DeleteSubject)
 
 				// Timetable (static paths before /:id)
-				timetable.POST("/generate", timetableController.GenerateTimetable)
-				timetable.POST("/generate/preview", timetableController.PreviewGenerateTimetable)
-				timetable.GET("/class/:class_id", timetableController.GetTimetableByClass)
-				timetable.GET("/by-staff/:staff_id", timetableController.GetTimetableByStaff)
-				timetable.GET("/by-course/:course_id", timetableController.GetTimetableByCourse)
-				timetable.GET("/validate", timetableController.ValidateTimetable)
-				timetable.POST("/", timetableController.CreateTimetable)
-				timetable.GET("/:id", timetableController.GetTimetable)
-				timetable.PUT("/:id", timetableController.UpdateTimetable)
-				timetable.DELETE("/:id", timetableController.DeleteTimetable)
+				//
+				// Preview and commit are separate permissions so a coordinator
+				// can experiment without overwriting a published timetable.
+				timetable.POST("/generate", middlewares.RequirePermission(auth.PermTimetableGenerate), timetableController.GenerateTimetable)
+				timetable.POST("/generate/preview", middlewares.RequirePermission(auth.PermTimetablePreview), timetableController.PreviewGenerateTimetable)
+				timetable.GET("/class/:class_id", middlewares.RequirePermission(auth.PermTimetableRead), timetableController.GetTimetableByClass)
+				timetable.GET("/by-staff/:staff_id", middlewares.RequirePermission(auth.PermTimetableRead), timetableController.GetTimetableByStaff)
+				timetable.GET("/by-course/:course_id", middlewares.RequirePermission(auth.PermTimetableRead), timetableController.GetTimetableByCourse)
+				timetable.GET("/validate", middlewares.RequirePermission(auth.PermTimetableRead), timetableController.ValidateTimetable)
+				timetable.POST("/", middlewares.RequirePermission(auth.PermTimetableGenerate), timetableController.CreateTimetable)
+				timetable.GET("/:id", middlewares.RequirePermission(auth.PermTimetableRead), timetableController.GetTimetable)
+				timetable.PUT("/:id", middlewares.RequirePermission(auth.PermTimetableOverride), timetableController.UpdateTimetable)
+				timetable.DELETE("/:id", middlewares.RequirePermission(auth.PermTimetableOverride), timetableController.DeleteTimetable)
 			}
 		}
 	}
+}
+
+// buildImpersonationService wires the support-access service.
+//
+// Impersonation is off unless IM_PERSONATION_ENABLED is explicitly true, so a
+// deployment that has not thought about support access does not have it. A
+// missing or unresolvable JWT secret disables it too, rather than failing boot:
+// a misconfiguration in an optional feature must not take the API down.
+func buildImpersonationService(
+	institutionRepo repositories.InstitutionRepository,
+	audit *services.AuditRecorder,
+) *services.ImpersonationService {
+	cfg := services.DefaultImpersonationConfig()
+	cfg.Enabled = strings.EqualFold(config.GetEnv("IM_PERSONATION_ENABLED", "false"), "true")
+
+	if minutes, err := strconv.Atoi(config.GetEnv("IM_PERSONATION_TTL_MINUTES", "15")); err == nil && minutes > 0 {
+		cfg.TTL = time.Duration(minutes) * time.Minute
+	}
+	if max, err := strconv.Atoi(config.GetEnv("IM_PERSONATION_MAX_CONCURRENT", "1")); err == nil && max > 0 {
+		cfg.MaxConcurrent = max
+	}
+
+	if !cfg.Enabled {
+		logger.Info("Impersonation (support access) is disabled — set IM_PERSONATION_ENABLED=true to allow audited read-only sessions")
+		return services.NewImpersonationService(institutionRepo, audit, cfg, nil, nil)
+	}
+
+	issuer, err := services.NewSupportTokenIssuer()
+	if err != nil {
+		logger.Error("Impersonation enabled but unavailable: %v", err)
+		cfg.Enabled = false
+		return services.NewImpersonationService(institutionRepo, audit, cfg, nil, nil)
+	}
+
+	// Sessions are counted in-process. A multi-instance deployment should move
+	// this to shared state; until then the cap is per instance, which errs
+	// toward allowing a session rather than locking an operator out.
+	var live int
+	return services.NewImpersonationService(
+		institutionRepo,
+		audit,
+		cfg,
+		issuer.Issue,
+		func() int { return live },
+	)
 }

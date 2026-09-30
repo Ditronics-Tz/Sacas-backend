@@ -9,6 +9,7 @@ import (
 	"go_boilerplate/internal/middlewares"
 	"go_boilerplate/internal/models"
 	"go_boilerplate/internal/repositories"
+	"go_boilerplate/internal/services"
 	"go_boilerplate/pkg/logger"
 )
 
@@ -17,11 +18,15 @@ import (
 // with no institution_id) may list, create, or change institutions. A tenant
 // admin can read only its own institution via /protected/institution/me.
 type InstitutionController struct {
-	repo repositories.InstitutionRepository
+	repo  repositories.InstitutionRepository
+	audit *services.AuditRecorder
 }
 
-func NewInstitutionController(repo repositories.InstitutionRepository) *InstitutionController {
-	return &InstitutionController{repo: repo}
+// NewInstitutionController builds the controller. The audit recorder is required
+// because every write here is a platform-level action on a tenant — the kind of
+// event an operator will later need to explain.
+func NewInstitutionController(repo repositories.InstitutionRepository, audit *services.AuditRecorder) *InstitutionController {
+	return &InstitutionController{repo: repo, audit: audit}
 }
 
 type CreateInstitutionRequest struct {
@@ -124,6 +129,12 @@ func (c *InstitutionController) Create(ctx *gin.Context) {
 	}
 
 	logger.Info("Institution created: %s (ID %d, status %s)", institution.Name, institution.ID, institution.Status)
+	c.audit.Record(ctx, models.AuditInstitutionCreate, "institution",
+		uintString(institution.ID), institution.Name, map[string]any{
+			"status": string(institution.Status),
+			"plan":   string(institution.Plan),
+			"type":   string(institution.Type),
+		})
 	ctx.JSON(http.StatusCreated, gin.H{"message": "Institution created successfully", "institution": institution})
 }
 
@@ -193,6 +204,13 @@ func (c *InstitutionController) Update(ctx *gin.Context) {
 		return
 	}
 
+	// Capture the state before the change so the trail records the transition,
+	// not just the destination. A suspension in particular is the event an
+	// operator will be asked about later.
+	previousStatus := institution.Status
+	previousPlan := institution.Plan
+	previousTrial := institution.TrialEndsAt
+
 	if req.Name != nil {
 		institution.Name = *req.Name
 	}
@@ -256,7 +274,45 @@ func (c *InstitutionController) Update(ctx *gin.Context) {
 	}
 
 	logger.Info("Institution updated: %s (ID %d, status %s)", institution.Name, institution.ID, institution.Status)
+
+	// A status change is audited as a suspension when the institution stopped
+	// being usable, because that is the question the trail gets asked.
+	if institution.Status != previousStatus {
+		action := models.AuditInstitutionUpdate
+		if institution.Status == models.InstitutionStatusSuspended {
+			action = models.AuditInstitutionSuspend
+		}
+		c.audit.Record(ctx, action, "institution", uintString(institution.ID), institution.Name, map[string]any{
+			"from": string(previousStatus),
+			"to":   string(institution.Status),
+		})
+	}
+	if institution.Plan != previousPlan {
+		c.audit.Record(ctx, models.AuditInstitutionPlanChange, "institution", uintString(institution.ID), institution.Name, map[string]any{
+			"from": string(previousPlan),
+			"to":   string(institution.Plan),
+		})
+	}
+	if trialChanged(previousTrial, institution.TrialEndsAt) {
+		c.audit.Record(ctx, models.AuditInstitutionUpdate, "institution", uintString(institution.ID), institution.Name, map[string]any{
+			"trial_ends_at": institution.TrialEndsAt,
+			"trial_changed": true,
+		})
+	}
+
 	ctx.JSON(http.StatusOK, gin.H{"message": "Institution updated successfully", "institution": institution})
+}
+
+// trialChanged reports whether a trial end date actually moved.
+func trialChanged(before, after *time.Time) bool {
+	switch {
+	case before == nil && after == nil:
+		return false
+	case before == nil || after == nil:
+		return true
+	default:
+		return !before.Equal(*after)
+	}
 }
 
 func (c *InstitutionController) Delete(ctx *gin.Context) {
@@ -284,6 +340,9 @@ func (c *InstitutionController) Delete(ctx *gin.Context) {
 	}
 
 	logger.Info("Institution deleted: ID %d", id)
+	c.audit.Record(ctx, models.AuditInstitutionDelete, "institution", uintString(id), "", map[string]any{
+		"severity": "high",
+	})
 	ctx.JSON(http.StatusOK, gin.H{"message": "Institution deleted successfully"})
 }
 

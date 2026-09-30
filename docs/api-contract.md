@@ -20,6 +20,156 @@ Timetable domain routes also need role **`administrator`** or **`super_admin`**.
 
 ---
 
+## Roles and permissions
+
+Authorisation is a capability model. `GET /api/protected/me/permissions` returns
+the caller's exact permission list, and **the UI should gate on that** rather
+than hardcoding role checks — the server stays the single source of truth.
+
+### GET `/api/protected/me/permissions`
+
+Any authenticated account. No query parameters. Call it once after login.
+
+```json
+{
+  "role": "academic_coordinator",
+  "permissions": [
+    "class:read", "class:write", "course:read", "course:write",
+    "faculty:read", "faculty:write", "module:read", "module:write",
+    "room:read", "room:write", "staff:read", "staff:write",
+    "subject:read", "subject:write", "timetable:generate",
+    "timetable:preview", "timetable:publish", "timetable:read",
+    "profile:read", "profile:update", "password:set", "user:read"
+  ],
+  "assignable_roles": ["user"],
+  "institution_id": 2,
+  "is_platform_account": false,
+  "is_support_session": false,
+  "read_only": false,
+  "workspace": "institution"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `permissions` | Everything this session may do. Gate UI affordances on these. |
+| `assignable_roles` | Which roles this user may hand out. **Populate the role dropdown from this** — a tenant admin sees only `user`, which is the UI half of the anti-escalation rule. |
+| `workspace` | `platform`, `institution`, or `support`. Use it to pick the nav shape. |
+| `is_platform_account` | A `super_admin` not bound to an institution. |
+| `is_support_session` | A read-only support session; disable all editing. |
+| `read_only` | Cannot change anything anybody else can see. **Not** "can do nothing" — a lecturer can still change their own password. Use for a global banner only. |
+| `institution_id` | `null` for a platform account. |
+
+### Roles
+
+| Role | Can |
+|---|---|
+| `super_admin` | Manage institutions, roles, platform settings, audit trail. **No** institution-workspace access. |
+| `administrator` | Full control inside one institution, including its users. |
+| `academic_coordinator` | Curriculum and teaching timetable. Reads users (to resolve staff), cannot create them. |
+| `exam_coordinator` | Exams. Reads the structure to schedule them, cannot rewrite the curriculum. |
+| `user` | Own profile and read-only view of the structure. |
+
+A `super_admin` is **not** bound to an institution, so it cannot reach any
+institution's data — a request to an institution workspace returns `403` with
+`"reason": "platform accounts are not bound to an institution"`. Support access
+is granted separately, below.
+
+### Role assignment
+
+- A platform `super_admin` may create any role in any institution. This is how
+  institution admins come to exist.
+- An institution admin may assign **only** `user`. Promoting anyone requires the
+  platform.
+- A `super_admin` cannot be bound to an institution; the request is rejected with
+  `400` rather than creating an account the workspace gate would refuse.
+- The support role is never assignable.
+
+A refused attempt returns `403` and is written to the audit log as
+`outcome: denied`.
+
+### 403 body
+
+```json
+{
+  "error": "Insufficient permissions",
+  "your_role": "user",
+  "required": ["user:write"]
+}
+```
+
+The **required** permission is included so the UI can explain itself. Your own
+permission list is not, so you cannot reconstruct the policy from an error — use
+`/me/permissions`.
+
+### Support access (impersonation)
+
+`POST /api/protected/superadmin/institutions/:id/impersonate` — platform only.
+Returns a **read-only, short-lived, audited** session token:
+
+```json
+{
+  "message": "Read-only support session created. Every action taken with this token is recorded in the audit log.",
+  "session": {
+    "token": "…",
+    "institution_id": 2,
+    "institution_name": "Dar es Salaam University",
+    "role": "institution_support",
+    "expires_at": "2026-09-30T15:10:00Z",
+    "read_only": true,
+    "allowed_permissions": ["class:read", "course:read", "…"]
+  }
+}
+```
+
+Use `session.token` as the bearer token to browse that institution read-only.
+Disabled unless `IM_PERSONATION_ENABLED=true`. `POST .../impersonate/end` records
+the end of the session.
+
+---
+
+## Audit log
+
+`GET /api/protected/audit` — the caller's own institution's trail.
+`GET /api/protected/superadmin/audit` — platform-wide, or `?institution_id=N`.
+`GET /api/protected/superadmin/audit/target/:type/:id` — one object's history,
+oldest first.
+
+Filters: `institution_id`, `actor_id`, `action`, `outcome`, `target_type`,
+`target_id`, `from`, `to` (RFC3339), `limit`, `offset`.
+
+```json
+{
+  "entries": [
+    {
+      "id": 412,
+      "recorded_at": "2026-09-30T14:02:11Z",
+      "actor_id": 1,
+      "actor_email": "root@sacas.co.tz",
+      "actor_role": "super_admin",
+      "institution_id": null,
+      "action": "role.change",
+      "outcome": "success",
+      "target": "coordinator@dstu.ac.tz",
+      "target_id": "42",
+      "target_type": "user",
+      "detail": "{\"from\":\"user\",\"to\":\"academic_coordinator\"}",
+      "ip_address": "197.157.2.3",
+      "user_agent": "Mozilla/5.0 …"
+    }
+  ],
+  "total": 1,
+  "limit": 10,
+  "offset": 0
+}
+```
+
+`institution_id: null` means a **platform** action. `outcome` is `success`,
+`denied`, or `failure` — refusals are recorded too, so a run of denied
+impersonation or escalation attempts is visible. The trail is append-only.
+
+---
+
 ## Multi-tenancy
 
 Every timetable-domain record belongs to exactly one institution. The tenant is

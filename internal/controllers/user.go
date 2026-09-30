@@ -12,17 +12,24 @@ import (
 
 	"go_boilerplate/internal/models"
 	"go_boilerplate/internal/repositories"
+	"go_boilerplate/internal/services"
 	"go_boilerplate/pkg/logger"
 	"go_boilerplate/pkg/security"
+
+	"go_boilerplate/internal/auth"
 )
 
 type UserController struct {
 	userRepo repositories.UserRepository
+	audit    *services.AuditRecorder
 }
 
-func NewUserController(userRepo repositories.UserRepository) *UserController {
+// NewUserController builds the controller. The audit recorder is required for
+// every path that changes a role, an account's active state, or the user list.
+func NewUserController(userRepo repositories.UserRepository, audit *services.AuditRecorder) *UserController {
 	return &UserController{
 		userRepo: userRepo,
+		audit:    audit,
 	}
 }
 
@@ -147,23 +154,41 @@ func (uc *UserController) CreateUser(c *gin.Context) {
 		return
 	}
 
-	// Check if user creating this has permission to assign the role
-	currentUserRole := c.GetString("role")
-	if currentUserRole != string(models.RoleSuperAdmin) {
-		if req.Role == models.RoleSuperAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Only super admin can create super admin users"})
-			return
-		}
-		if req.Role == models.RoleAdmin && currentUserRole != string(models.RoleAdmin) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions to create admin users"})
-			return
-		}
+	// Role assignment policy (see auth.AssignableRoles):
+	//
+	//   - A platform super_admin may create any role, in any institution. This
+	//     is how institution admins get created.
+	//   - An institution admin may create only the plain `user` role. Letting a
+	//     tenant admin mint another admin or a coordinator would be an
+	//     escalation path inside a tenant, so promotion goes through the
+	//     platform.
+	//   - The support role can never be assigned permanently; it exists only
+	//     inside a short-lived support token.
+	currentUserRole := models.UserRole(c.GetString("role"))
+	if !auth.CanAssign(currentUserRole, req.Role) {
+		uc.audit.RecordDenied(c, models.AuditUserCreate, "user", "", req.Email,
+			"caller may not assign role "+string(req.Role))
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":          "You may not assign this role",
+			"your_role":      string(currentUserRole),
+			"assignable":     roleStrings(auth.AssignableRoles(currentUserRole)),
+			"requested_role": string(req.Role),
+		})
+		return
+	}
+	if req.Role == models.RoleSupport {
+		// Belt and braces: CanAssign already excludes it, but the support role
+		// must never be persisted on a user row under any path.
+		uc.audit.RecordDenied(c, models.AuditUserCreate, "user", "", req.Email,
+			"support role cannot be assigned to a persistent account")
+		c.JSON(http.StatusForbidden, gin.H{"error": "This role cannot be assigned to an account"})
+		return
 	}
 
 	// The target institution is the caller's own, unless a platform
 	// super_admin explicitly names another one.
 	targetInstitution := inst
-	isPlatform := currentUserRole == string(models.RoleSuperAdmin) && repositories.IsPlatformScope(inst)
+	isPlatform := currentUserRole == models.RoleSuperAdmin && repositories.IsPlatformScope(inst)
 	if isPlatform {
 		if req.InstitutionID != nil {
 			targetInstitution = *req.InstitutionID
@@ -172,6 +197,18 @@ func (uc *UserController) CreateUser(c *gin.Context) {
 			// platform-level account (institution_id NULL).
 			targetInstitution = repositories.PlatformScope
 		}
+	}
+
+	// A super_admin role only makes sense for a platform-level account. A
+	// super_admin bound to an institution would be a tenant user with platform
+	// reach, which the workspace gate would refuse anyway — so refuse it at
+	// write time with a clear message instead.
+	if req.Role == models.RoleSuperAdmin && !repositories.IsPlatformScope(targetInstitution) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "A super_admin must not be bound to an institution",
+			"details": "Create the account without an institution_id to make it a platform account.",
+		})
+		return
 	}
 
 	// Hash password
@@ -203,7 +240,13 @@ func (uc *UserController) CreateUser(c *gin.Context) {
 		return
 	}
 
-	logger.Info("User created successfully: %s (ID: %d)", user.Email, user.ID)
+	uc.audit.Record(c, models.AuditUserCreate, "user", uintString(user.ID), user.Email, map[string]any{
+		"assigned_role":  string(user.Role),
+		"is_active":      user.IsActive,
+		"institution_id": institutionDetail(user.InstitutionID),
+	})
+
+	logger.Info("User created successfully: %s (ID: %d, role %s)", user.Email, user.ID, user.Role)
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "User created successfully",
 		"user":    user,
@@ -237,25 +280,59 @@ func (uc *UserController) UpdateUser(c *gin.Context) {
 		return
 	}
 
-	// Check permissions for role changes
-	currentUserRole := c.GetString("role")
-	if req.Role != "" && req.Role != user.Role {
-		if currentUserRole != string(models.RoleSuperAdmin) {
-			if req.Role == models.RoleSuperAdmin || user.Role == models.RoleSuperAdmin {
-				c.JSON(http.StatusForbidden, gin.H{"error": "Only super admin can modify super admin roles"})
-				return
-			}
-			if (req.Role == models.RoleAdmin || user.Role == models.RoleAdmin) && currentUserRole != string(models.RoleAdmin) {
-				c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions to modify admin roles"})
-				return
-			}
-		}
-		if req.Role.IsValid() {
-			user.Role = req.Role
-		} else {
+	// Role changes go through the same policy as creation, and are audited
+	// with the before/after pair so the trail shows what actually changed.
+	//
+	// An institution admin may only hand out the plain `user` role, which in
+	// practice means they cannot promote anyone. Promotion is a platform
+	// decision. This is deliberately stricter than the old rule, which let an
+	// institution admin create other institution admins.
+	currentUserRole := models.UserRole(c.GetString("role"))
+	roleChanging := req.Role != "" && models.UserRole(req.Role) != user.Role
+	previousRole := user.Role
+	previousActive := user.IsActive
+
+	if roleChanging {
+		if !req.Role.IsValid() {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid role"})
 			return
 		}
+		if !auth.CanAssign(currentUserRole, models.UserRole(req.Role)) {
+			uc.audit.RecordDenied(c, models.AuditRoleChange, "user", uintString(user.ID), user.Email,
+				"caller "+string(currentUserRole)+" may not assign role "+string(req.Role))
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":          "You may not assign this role",
+				"your_role":      string(currentUserRole),
+				"assignable":     roleStrings(auth.AssignableRoles(currentUserRole)),
+				"requested_role": string(req.Role),
+			})
+			return
+		}
+		if models.UserRole(req.Role) == models.RoleSupport {
+			uc.audit.RecordDenied(c, models.AuditRoleChange, "user", uintString(user.ID), user.Email,
+				"support role cannot be assigned to a persistent account")
+			c.JSON(http.StatusForbidden, gin.H{"error": "This role cannot be assigned to an account"})
+			return
+		}
+		// A super_admin role on an institution-bound account would be refused
+		// by the workspace gate anyway; refuse it here with a clear message.
+		if models.UserRole(req.Role) == models.RoleSuperAdmin && user.InstitutionID != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "A super_admin must not be bound to an institution",
+				"details": "This user belongs to an institution and cannot hold the platform role.",
+			})
+			return
+		}
+		// Changing a super_admin's role is platform-only, and only from the
+		// platform group. A super_admin has no institution, so it can never
+		// appear in a tenant-scoped listing; this is defence in depth.
+		if previousRole == models.RoleSuperAdmin && !currentUserRole.IsPlatformRole() {
+			uc.audit.RecordDenied(c, models.AuditRoleChange, "user", uintString(user.ID), user.Email,
+				"non-platform caller attempted to change a super_admin role")
+			c.JSON(http.StatusForbidden, gin.H{"error": "Only a platform administrator can change a platform account"})
+			return
+		}
+		user.Role = models.UserRole(req.Role)
 	}
 
 	// Update fields if provided
@@ -279,6 +356,31 @@ func (uc *UserController) UpdateUser(c *gin.Context) {
 		logger.Error("Failed to update user %d: %v", id, err)
 		respondRepoError(c, "User not found", err)
 		return
+	}
+
+	// A role change and an activation change are separately auditable, because
+	// "who was promoted" and "who was re-enabled" are different questions.
+	if roleChanging {
+		uc.audit.Record(c, models.AuditRoleChange, "user", uintString(user.ID), user.Email, map[string]any{
+			"from": string(previousRole),
+			"to":   string(user.Role),
+		})
+	}
+	if user.IsActive != previousActive {
+		action := models.AuditUserActivate
+		if !user.IsActive {
+			action = models.AuditUserSuspend
+		}
+		uc.audit.Record(c, action, "user", uintString(user.ID), user.Email, map[string]any{
+			"is_active": user.IsActive,
+		})
+	}
+	if roleChanging || user.IsActive != previousActive || req.Email != "" {
+		uc.audit.Record(c, models.AuditUserUpdate, "user", uintString(user.ID), user.Email, map[string]any{
+			"role":      string(user.Role),
+			"is_active": user.IsActive,
+			"email":     user.Email,
+		})
 	}
 
 	logger.Info("User updated successfully: %d", id)
@@ -309,17 +411,23 @@ func (uc *UserController) DeleteUser(c *gin.Context) {
 		return
 	}
 
-	// Check permissions
-	currentUserRole := c.GetString("role")
-	if currentUserRole != string(models.RoleSuperAdmin) {
-		if user.Role == models.RoleSuperAdmin {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Only super admin can delete super admin users"})
-			return
-		}
-		if user.Role == models.RoleAdmin && currentUserRole != string(models.RoleAdmin) {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions to delete admin users"})
-			return
-		}
+	// A platform account cannot be reached here: it has no institution, so the
+	// tenant check above already rejected it. A support session holds no
+	// delete permission and is refused by the route's RequirePermission, but
+	// the role is checked again so the rule holds even if a route is wired
+	// differently later.
+	currentUserRole := models.UserRole(c.GetString("role"))
+	if currentUserRole == models.RoleSupport {
+		uc.audit.RecordDenied(c, models.AuditUserDelete, "user", uintString(id), user.Email,
+			"support session attempted a delete")
+		c.JSON(http.StatusForbidden, gin.H{"error": "A support session is read-only"})
+		return
+	}
+	if user.Role == models.RoleSuperAdmin && !currentUserRole.IsPlatformRole() {
+		uc.audit.RecordDenied(c, models.AuditUserDelete, "user", uintString(id), user.Email,
+			"non-platform caller attempted to delete a platform account")
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only a platform administrator can delete a platform account"})
+		return
 	}
 
 	// Prevent self-deletion
@@ -328,11 +436,20 @@ func (uc *UserController) DeleteUser(c *gin.Context) {
 		return
 	}
 
+	deletedEmail := user.Email
+	deletedRole := user.Role
+
 	if err := uc.userRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete user %d: %v", id, err)
 		respondRepoError(c, "User not found", err)
 		return
 	}
+
+	uc.audit.Record(c, models.AuditUserDelete, "user", uintString(id), deletedEmail, map[string]any{
+		"role":     string(deletedRole),
+		"self":     false,
+		"severity": "high",
+	})
 
 	logger.Info("User deleted successfully: %d", id)
 	c.JSON(http.StatusOK, gin.H{"message": "User deleted successfully"})
@@ -391,6 +508,73 @@ func (uc *UserController) ChangePassword(c *gin.Context) {
 
 	logger.Info("Password changed successfully for user %d", userID)
 	c.JSON(http.StatusOK, gin.H{"message": "Password changed successfully"})
+}
+
+// GetMyPermissions handles GET /api/protected/me/permissions.
+//
+// The frontend calls this after login and uses the list to decide which nav
+// items and buttons to render. Driving the UI from the server's own permission
+// map — rather than hardcoding a role check in the frontend — is what keeps the
+// two from disagreeing about what a role can do.
+//
+// The response also states the caller's scope, because a super_admin and an
+// institution admin have genuinely different shapes of access and the UI
+// needs to branch on that.
+func (uc *UserController) GetMyPermissions(c *gin.Context) {
+	role := models.UserRole(c.GetString("role"))
+	inst := tenantID(c)
+	isPlatform := role == models.RoleSuperAdmin && repositories.IsPlatformScope(inst)
+
+	permissions := auth.PermissionsFor(role)
+	asStrings := make([]string, 0, len(permissions))
+	for _, p := range permissions {
+		asStrings = append(asStrings, string(p))
+	}
+
+	body := gin.H{
+		"role":                string(role),
+		"permissions":         asStrings,
+		"assignable_roles":    roleStrings(auth.AssignableRoles(role)),
+		"institution_id":      nil,
+		"is_platform_account": isPlatform,
+		"is_support_session":  role == models.RoleSupport,
+		"read_only":           auth.IsReadOnly(role),
+	}
+	if !repositories.IsPlatformScope(inst) {
+		body["institution_id"] = inst
+	}
+	if role.IsPlatformRole() {
+		// A platform account has no institution workspace, and the response
+		// says so explicitly rather than letting the UI guess from a null id.
+		body["workspace"] = "platform"
+	} else if role == models.RoleSupport {
+		body["workspace"] = "support"
+	} else {
+		body["workspace"] = "institution"
+	}
+
+	c.JSON(http.StatusOK, body)
+}
+
+// roleStrings renders a role list for JSON output.
+func roleStrings(roles []models.UserRole) []string {
+	out := make([]string, 0, len(roles))
+	for _, r := range roles {
+		out = append(out, string(r))
+	}
+	return out
+}
+
+// uintString renders a uint ID for an audit target.
+func uintString(id uint) string { return strconv.FormatUint(uint64(id), 10) }
+
+// institutionDetail renders an institution pointer for an audit detail map,
+// distinguishing "platform" from "no institution set" in the trail.
+func institutionDetail(id *uint) any {
+	if id == nil {
+		return "platform"
+	}
+	return *id
 }
 
 // GetProfile returns the current user's profile

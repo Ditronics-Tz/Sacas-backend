@@ -35,6 +35,7 @@ func RunMigrations(db *gorm.DB) error {
 		&models.Subject{},
 		&models.Timetable{},
 		&models.GenerationSettings{},
+		&models.AuditLog{},
 	)
 	if err != nil {
 		log.Printf("Migration failed: %v", err)
@@ -293,6 +294,7 @@ func DropAllTables(db *gorm.DB) error {
 		&models.Faculty{},
 		&models.User{},
 		&models.GenerationSettings{},
+		&models.AuditLog{},
 		&models.Institution{},
 	)
 }

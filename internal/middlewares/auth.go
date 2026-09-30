@@ -89,8 +89,25 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 		c.Set("user_id", claims["user_id"])
 		c.Set("role", claims["role"])
 		c.Set("email", claims["email"])
+		// A support-access token names the institution it is scoped to. Normal
+		// login tokens never carry this, because their tenant comes from the
+		// user's database row instead. TenantMiddleware reads it only for the
+		// support role.
+		if inst, ok := claims["institution_id"]; ok && inst != nil {
+			c.Set(ContextKeyTokenInstitution, inst)
+		}
+		c.Set(ContextKeyIsSupport, isSupportClaims(claims))
 		c.Next()
 	}
+}
+
+// isSupportClaims reports whether a verified token is a support-access token.
+func isSupportClaims(claims jwt.MapClaims) bool {
+	if b, ok := claims["support"].(bool); !ok || !b {
+		return false
+	}
+	role, _ := claims["role"].(string)
+	return role == string(models.RoleSupport)
 }
 
 // roleFromContext returns the JWT role claim as a string (never from client input).
@@ -145,10 +162,9 @@ func RequireRole(roles ...string) gin.HandlerFunc {
 	}
 }
 
-func AdminMiddleware() gin.HandlerFunc {
-	return RequireRole(string(models.RoleAdmin), string(models.RoleSuperAdmin))
-}
-
+// SuperAdminMiddleware requires the super_admin role. New platform routes
+// should prefer RequirePlatformWorkspace, which additionally requires the
+// account to be unbound to an institution.
 func SuperAdminMiddleware() gin.HandlerFunc {
 	return RequireRole(string(models.RoleSuperAdmin))
 }
