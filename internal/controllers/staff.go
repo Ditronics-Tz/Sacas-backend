@@ -3,7 +3,6 @@ package controllers
 import (
 	"fmt"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -61,9 +60,13 @@ type UpdateStaffRequest struct {
 	StaffType   *string `json:"staff_type,omitempty"`
 	// UserID links/relinks this staff record to a login account (admin-only).
 	UserID *uint `json:"user_id,omitempty"`
+	// ClearUserID unlinks the staff record from its login account.
+	ClearUserID bool `json:"clear_user_id,omitempty"`
 }
 
 func (c *StaffController) CreateStaff(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req CreateStaffRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		logger.Error("Invalid request payload: %v", err)
@@ -76,12 +79,20 @@ func (c *StaffController) CreateStaff(ctx *gin.Context) {
 	}
 
 	// Explicit UserID linking only — never auto-match by email.
-	// If UserID is supplied, validate the User exists and is not already linked.
+	// If UserID is supplied, validate the User exists, belongs to this
+	// institution, and is not already linked to another staff record.
 	if req.UserID != nil {
-		if err := c.validateUserLink(nil, *req.UserID); err != nil {
+		if err := c.validateUserLink(inst, nil, *req.UserID); err != nil {
 			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
+	}
+
+	// Email is unique per institution, not globally. Report the collision
+	// here rather than letting it surface as an opaque 500.
+	if existing, err := c.staffRepo.GetByEmail(inst, req.Email); err == nil && existing != nil {
+		ctx.JSON(http.StatusConflict, gin.H{"error": "A staff member with this email already exists in this institution"})
+		return
 	}
 
 	staff := &models.Staff{
@@ -94,19 +105,21 @@ func (c *StaffController) CreateStaff(ctx *gin.Context) {
 		Title:       req.Title,
 		StaffType:   req.StaffType,
 		UserID:      req.UserID,
+		// Stamped from the session, never from the payload.
+		InstitutionID: inst,
 	}
 
 	if req.Preferences != "" {
 		staff.Preferences = []byte(req.Preferences)
 	}
 
-	if err := c.staffRepo.Create(staff); err != nil {
+	if err := c.staffRepo.Create(inst, staff); err != nil {
 		logger.Error("Failed to create staff: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create staff"})
 		return
 	}
 
-	created, err := c.staffRepo.GetByID(staff.ID)
+	created, err := c.staffRepo.GetByID(inst, staff.ID)
 	if err != nil {
 		logger.Error("Failed to fetch created staff: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch created staff"})
@@ -118,17 +131,18 @@ func (c *StaffController) CreateStaff(ctx *gin.Context) {
 }
 
 func (c *StaffController) GetStaff(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
 	}
 
-	staff, err := c.staffRepo.GetByID(uint(id))
+	staff, err := c.staffRepo.GetByID(inst, id)
 	if err != nil {
 		logger.Error("Failed to get staff: %v", err)
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Staff not found"})
+		respondRepoError(ctx, "Staff not found", err)
 		return
 	}
 
@@ -136,20 +150,11 @@ func (c *StaffController) GetStaff(ctx *gin.Context) {
 }
 
 func (c *StaffController) GetAllStaff(ctx *gin.Context) {
-	limitStr := ctx.DefaultQuery("limit", "10")
-	offsetStr := ctx.DefaultQuery("offset", "0")
+	inst := tenantID(ctx)
 
-	limit, err := strconv.Atoi(limitStr)
-	if err != nil || limit <= 0 {
-		limit = 10
-	}
+	limit, offset := parsePagination(ctx)
 
-	offset, err := strconv.Atoi(offsetStr)
-	if err != nil || offset < 0 {
-		offset = 0
-	}
-
-	staff, err := c.staffRepo.GetAll(limit, offset)
+	staff, err := c.staffRepo.GetAll(inst, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get staff: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get staff"})
@@ -160,8 +165,9 @@ func (c *StaffController) GetAllStaff(ctx *gin.Context) {
 }
 
 func (c *StaffController) UpdateStaff(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
@@ -174,10 +180,12 @@ func (c *StaffController) UpdateStaff(ctx *gin.Context) {
 		return
 	}
 
-	staff, err := c.staffRepo.GetByID(uint(id))
+	// A staff record owned by another institution resolves to not-found, so
+	// the update below can never reach it.
+	staff, err := c.staffRepo.GetByID(inst, id)
 	if err != nil {
 		logger.Error("Failed to get staff: %v", err)
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Staff not found"})
+		respondRepoError(ctx, "Staff not found", err)
 		return
 	}
 
@@ -185,6 +193,10 @@ func (c *StaffController) UpdateStaff(ctx *gin.Context) {
 		staff.Name = *req.Name
 	}
 	if req.Email != nil {
+		if existing, err := c.staffRepo.GetByEmail(inst, *req.Email); err == nil && existing != nil && existing.ID != staff.ID {
+			ctx.JSON(http.StatusConflict, gin.H{"error": "A staff member with this email already exists in this institution"})
+			return
+		}
 		staff.Email = *req.Email
 	}
 	if req.FacultyID != nil {
@@ -208,18 +220,34 @@ func (c *StaffController) UpdateStaff(ctx *gin.Context) {
 	if req.StaffType != nil {
 		staff.StaffType = *req.StaffType
 	}
-	if req.UserID != nil {
-		if err := c.validateUserLink(&staff.ID, *req.UserID); err != nil {
-			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
-		}
-		staff.UserID = req.UserID
-	}
 
-	if err := c.staffRepo.Update(staff); err != nil {
+	if err := c.staffRepo.Update(inst, staff); err != nil {
 		logger.Error("Failed to update staff: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update staff"})
 		return
+	}
+
+	// The login link is written separately: it is a privileged field and must
+	// not be settable through the ordinary profile update above.
+	switch {
+	case req.ClearUserID:
+		if err := c.staffRepo.SetUserLink(inst, staff.ID, nil); err != nil {
+			logger.Error("Failed to clear staff user link: %v", err)
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update staff"})
+			return
+		}
+		staff.UserID = nil
+	case req.UserID != nil:
+		if err := c.validateUserLink(inst, &staff.ID, *req.UserID); err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if err := c.staffRepo.SetUserLink(inst, staff.ID, req.UserID); err != nil {
+			logger.Error("Failed to link staff user: %v", err)
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update staff"})
+			return
+		}
+		staff.UserID = req.UserID
 	}
 
 	logger.Info("Staff updated successfully: ID %d", staff.ID)
@@ -227,16 +255,17 @@ func (c *StaffController) UpdateStaff(ctx *gin.Context) {
 }
 
 func (c *StaffController) DeleteStaff(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
 	}
 
-	if err := c.staffRepo.Delete(uint(id)); err != nil {
+	if err := c.staffRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete staff: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete staff"})
+		respondRepoError(ctx, "Staff not found", err)
 		return
 	}
 
@@ -246,27 +275,31 @@ func (c *StaffController) DeleteStaff(ctx *gin.Context) {
 
 // AssignModule POST /staff/:id/modules/:module_id
 func (c *StaffController) AssignModule(ctx *gin.Context) {
-	staffID, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
+	inst := tenantID(ctx)
+
+	staffID, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
 	}
-	moduleID, err := strconv.ParseUint(ctx.Param("module_id"), 10, 32)
+	moduleID, err := parseIDParam(ctx, "module_id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid module ID"})
 		return
 	}
 
-	if _, err := c.staffRepo.GetByID(uint(staffID)); err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Staff not found"})
+	// Both sides are resolved inside the institution, so a cross-tenant staff
+	// or module ID is a 404 rather than a link that spans two campuses.
+	if _, err := c.staffRepo.GetByID(inst, staffID); err != nil {
+		respondRepoError(ctx, "Staff not found", err)
 		return
 	}
-	if _, err := c.moduleRepo.GetByID(uint(moduleID)); err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Module not found"})
+	if _, err := c.moduleRepo.GetByID(inst, moduleID); err != nil {
+		respondRepoError(ctx, "Module not found", err)
 		return
 	}
 
-	if err := c.staffRepo.AssignModule(uint(staffID), uint(moduleID)); err != nil {
+	if err := c.staffRepo.AssignModule(inst, staffID, moduleID); err != nil {
 		logger.Error("Failed to assign module: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to assign module"})
 		return
@@ -277,20 +310,22 @@ func (c *StaffController) AssignModule(ctx *gin.Context) {
 
 // UnassignModule DELETE /staff/:id/modules/:module_id
 func (c *StaffController) UnassignModule(ctx *gin.Context) {
-	staffID, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
+	inst := tenantID(ctx)
+
+	staffID, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
 	}
-	moduleID, err := strconv.ParseUint(ctx.Param("module_id"), 10, 32)
+	moduleID, err := parseIDParam(ctx, "module_id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid module ID"})
 		return
 	}
 
-	if err := c.staffRepo.UnassignModule(uint(staffID), uint(moduleID)); err != nil {
+	if err := c.staffRepo.UnassignModule(inst, staffID, moduleID); err != nil {
 		logger.Error("Failed to unassign module: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unassign module"})
+		respondRepoError(ctx, "Staff not found", err)
 		return
 	}
 
@@ -299,18 +334,20 @@ func (c *StaffController) UnassignModule(ctx *gin.Context) {
 
 // ListStaffModules GET /staff/:id/modules
 func (c *StaffController) ListStaffModules(ctx *gin.Context) {
-	staffID, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
+	inst := tenantID(ctx)
+
+	staffID, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
 	}
 
-	if _, err := c.staffRepo.GetByID(uint(staffID)); err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Staff not found"})
+	if _, err := c.staffRepo.GetByID(inst, staffID); err != nil {
+		respondRepoError(ctx, "Staff not found", err)
 		return
 	}
 
-	modules, err := c.staffRepo.ListModules(uint(staffID))
+	modules, err := c.staffRepo.ListModules(inst, staffID)
 	if err != nil {
 		logger.Error("Failed to list staff modules: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list modules"})
@@ -322,18 +359,20 @@ func (c *StaffController) ListStaffModules(ctx *gin.Context) {
 
 // ListModuleStaff GET /modules/:id/staff
 func (c *StaffController) ListModuleStaff(ctx *gin.Context) {
-	moduleID, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
+	inst := tenantID(ctx)
+
+	moduleID, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid module ID"})
 		return
 	}
 
-	if _, err := c.moduleRepo.GetByID(uint(moduleID)); err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Module not found"})
+	if _, err := c.moduleRepo.GetByID(inst, moduleID); err != nil {
+		respondRepoError(ctx, "Module not found", err)
 		return
 	}
 
-	staff, err := c.staffRepo.ListStaffForModule(uint(moduleID))
+	staff, err := c.staffRepo.ListStaffForModule(inst, moduleID)
 	if err != nil {
 		logger.Error("Failed to list module staff: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list staff"})
@@ -346,32 +385,19 @@ func (c *StaffController) ListModuleStaff(ctx *gin.Context) {
 // GetMyStaff handles GET /api/protected/me/staff — returns the Staff record
 // linked to the currently authenticated user via staff.user_id FK.
 // Spec: user with no linked staff gets 404 (clear, not 500); linked user gets staff.
+//
+// Both the user ID and the institution come from the resolved session, never
+// from the request, so a user can only ever read their own staff record.
 func (c *StaffController) GetMyStaff(ctx *gin.Context) {
-	rawUserID, exists := ctx.Get("user_id")
-	if !exists || rawUserID == nil {
+	inst := tenantID(ctx)
+
+	userID, ok := currentUserID(ctx)
+	if !ok {
 		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
 		return
 	}
-	var userID uint
-	switch v := rawUserID.(type) {
-	case float64:
-		userID = uint(v)
-	case int:
-		userID = uint(v)
-	case uint:
-		userID = v
-	case int64:
-		userID = uint(v)
-	default:
-		var n uint64
-		if _, err := fmt.Sscanf(fmt.Sprint(v), "%d", &n); err != nil {
-			ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user in token"})
-			return
-		}
-		userID = uint(n)
-	}
 
-	staff, err := c.staffRepo.GetByUserID(userID)
+	staff, err := c.staffRepo.GetByUserID(inst, userID)
 	if err != nil {
 		// No linked staff — not a server error.
 		ctx.JSON(http.StatusNotFound, gin.H{"error": "No staff profile is linked to your account", "staff": nil})
@@ -380,15 +406,22 @@ func (c *StaffController) GetMyStaff(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"staff": staff})
 }
 
-// validateUserLink ensures UserID exists and is not already linked to another staff.
-func (c *StaffController) validateUserLink(currentStaffID *uint, userID uint) error {
+// validateUserLink ensures UserID exists, belongs to the caller's institution,
+// and is not already linked to another staff record.
+func (c *StaffController) validateUserLink(institutionID uint, currentStaffID *uint, userID uint) error {
 	if c.userRepo != nil {
-		if _, err := c.userRepo.GetByID(userID); err != nil {
+		user, err := c.userRepo.GetByID(userID)
+		if err != nil {
 			return fmt.Errorf("linked user_id %d does not exist", userID)
+		}
+		// Refuse to link across institutions: that would let one campus's
+		// timetable surface in another campus's staff view.
+		if user.InstitutionID == nil || *user.InstitutionID != institutionID {
+			return fmt.Errorf("linked user_id %d does not belong to this institution", userID)
 		}
 	}
 	// Enforce 1:1 — at most one staff per user. Check existing link.
-	if existing, err := c.staffRepo.GetByUserID(userID); err == nil && existing != nil {
+	if existing, err := c.staffRepo.GetByUserID(institutionID, userID); err == nil && existing != nil {
 		if currentStaffID == nil || existing.ID != *currentStaffID {
 			return fmt.Errorf("user_id %d is already linked to staff %d", userID, existing.ID)
 		}

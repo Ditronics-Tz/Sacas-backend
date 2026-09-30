@@ -7,97 +7,56 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"gorm.io/gorm"
 	"go_boilerplate/internal/models"
 )
 
-// stubTimetableRepo implements repositories.TimetableRepository for tests and
-// records which staff_id was queried, so we can assert the handler only ever
-// uses the JWT-derived staff mapping.
-type stubTimetableRepo struct {
-	byStaff map[uint][]models.Timetable
-	lastStaffID uint
-}
-
-func (r *stubTimetableRepo) Create(t *models.Timetable) error      { return nil }
-func (r *stubTimetableRepo) GetByID(id uint) (*models.Timetable, error) { return nil, errNotFound }
-func (r *stubTimetableRepo) Update(t *models.Timetable) error      { return nil }
-func (r *stubTimetableRepo) Delete(id uint) error                  { return nil }
-func (r *stubTimetableRepo) DeleteByClass(classID uint) error      { return nil }
-func (r *stubTimetableRepo) ReplaceClassTimetable(classID uint, entries []models.Timetable) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepo) GetAll(limit, offset int) ([]models.Timetable, error) { return nil, nil }
-func (r *stubTimetableRepo) GetByClass(classID uint) ([]models.Timetable, error)  { return nil, nil }
-func (r *stubTimetableRepo) GetByStaff(staffID uint) ([]models.Timetable, error) {
-	r.lastStaffID = staffID
-	return r.byStaff[staffID], nil
-}
-func (r *stubTimetableRepo) GetByRoom(roomID uint) ([]models.Timetable, error) { return nil, nil }
-func (r *stubTimetableRepo) GetByDay(day models.Weekday) ([]models.Timetable, error) { return nil, nil }
-func (r *stubTimetableRepo) CheckConflicts(classID, staffID, roomID uint, day models.Weekday, startTime, endTime string, excludeID uint) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepo) GetByDateRange(startDate, endDate string) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepo) GetByCourse(courseID uint) ([]models.Timetable, error) { return nil, nil }
-func (r *stubTimetableRepo) DB() *gorm.DB { return nil }
-
-// staffRepoWithUser is a minimal StaffRepository stub returning a linked staff.
-type staffRepoWithUser struct {
-	staff *models.Staff
-}
-
-func (r *staffRepoWithUser) Create(s *models.Staff) error                { return nil }
-func (r *staffRepoWithUser) GetByID(id uint) (*models.Staff, error)      { return nil, errNotFound }
-func (r *staffRepoWithUser) GetByEmail(email string) (*models.Staff, error) { return nil, errNotFound }
-func (r *staffRepoWithUser) GetByUserID(userID uint) (*models.Staff, error) {
-	if r.staff != nil && r.staff.UserID != nil && *r.staff.UserID == userID {
-		cp := *r.staff
-		return &cp, nil
-	}
-	return nil, errNotFound
-}
-func (r *staffRepoWithUser) Update(s *models.Staff) error                { return nil }
-func (r *staffRepoWithUser) Delete(id uint) error                        { return nil }
-func (r *staffRepoWithUser) GetAll(limit, offset int) ([]models.Staff, error) { return nil, nil }
-func (r *staffRepoWithUser) GetByFaculty(facultyID uint, limit, offset int) ([]models.Staff, error) {
-	return nil, nil
-}
-func (r *staffRepoWithUser) GetWithModules(id uint) (*models.Staff, error) { return nil, errNotFound }
-func (r *staffRepoWithUser) UpdatePreferences(id uint, preferences string) error { return nil }
-func (r *staffRepoWithUser) AssignModule(staffID, moduleID uint) error   { return nil }
-func (r *staffRepoWithUser) UnassignModule(staffID, moduleID uint) error { return nil }
-func (r *staffRepoWithUser) ListModules(staffID uint) ([]models.Module, error) { return nil, nil }
-func (r *staffRepoWithUser) ListStaffForModule(moduleID uint) ([]models.Staff, error) { return nil, nil }
-
-func newMyTimetableRouter(staffRepo *staffRepoWithUser, ttRepo *stubTimetableRepo) *gin.Engine {
+// newMyTimetableRouter emulates the protected group: the tenant middleware has
+// already resolved user_id and institution_id onto the context. The session
+// identity is what the handler must use, never client input.
+func newMyTimetableRouter(
+	staffRepo *stubStaffRepo,
+	ttRepo *stubTimetableRepo,
+	sessionUserID uint,
+	sessionInstitution uint,
+) *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	ctrl := NewTimetableController(ttRepo, staffRepo, nil)
+	ctrl := NewTimetableController(ttRepo, staffRepo, newStubClassRepo(), newStubRoomRepo(), nil)
 	r := gin.New()
-	// Emulates the protected group: JWT middleware has already set user_id.
 	r.GET("/api/protected/timetable/my", func(c *gin.Context) {
-		c.Set("user_id", float64(7))
+		c.Set("user_id", sessionUserID)
+		c.Set("institution_id", sessionInstitution)
+		c.Set("role", string(models.RoleUser))
 		ctrl.GetMyTimetable(c)
 	})
 	return r
 }
 
-// TestGetMyTimetable_UsesJWTStaffLinkOnly verifies:
-//   - the staff record is resolved from the JWT user_id, not any client input
+// TestGetMyTimetable_UsesSessionStaffLinkOnly verifies:
+//   - the staff record is resolved from the session user_id, not any client input
+//   - the lookup is scoped to the session's institution
 //   - response shape is the frontend-compatible {"timetables": [...]}
-func TestGetMyTimetable_UsesJWTStaffLinkOnly(t *testing.T) {
-	userID := uint(7)
+func TestGetMyTimetable_UsesSessionStaffLinkOnly(t *testing.T) {
+	sessionUserID := uint(7)
 	staffID := uint(42)
-	ttRepo := &stubTimetableRepo{byStaff: map[uint][]models.Timetable{
-		staffID: {{ID: 1, StaffID: staffID, Day: models.Monday, StartTime: "08:00", EndTime: "09:00"}},
-	}}
-	// Another staff member's timetable exists — must never be returned.
-	ttRepo.byStaff[999] = []models.Timetable{{ID: 2, StaffID: 999}}
 
-	staffRepo := &staffRepoWithUser{staff: &models.Staff{ID: staffID, Name: "Dr A", UserID: &userID}}
-	r := newMyTimetableRouter(staffRepo, ttRepo)
+	staffRepo := newStubStaffRepo()
+	staffRepo.seedStaff(&models.Staff{
+		ID: staffID, Name: "Dr A", UserID: &sessionUserID, InstitutionID: tenantA,
+	})
+
+	ttRepo := newStubTimetableRepo()
+	ttRepo.seed(&models.Timetable{
+		StaffID: staffID, InstitutionID: tenantA,
+		Day: models.Monday, StartTime: "08:00", EndTime: "09:00",
+	})
+	// Another staff member's timetable exists in the same institution — must
+	// never be returned.
+	ttRepo.seed(&models.Timetable{
+		StaffID: 999, InstitutionID: tenantA,
+		Day: models.Tuesday, StartTime: "10:00", EndTime: "11:00",
+	})
+
+	r := newMyTimetableRouter(staffRepo, ttRepo, sessionUserID, tenantA)
 
 	// Attempt to manipulate via query param must be ignored.
 	req := httptest.NewRequest(http.MethodGet, "/api/protected/timetable/my?staff_id=999", nil)
@@ -106,9 +65,6 @@ func TestGetMyTimetable_UsesJWTStaffLinkOnly(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
-	}
-	if ttRepo.lastStaffID != staffID {
-		t.Fatalf("expected query for staff %d, got %d (client input may have leaked)", staffID, ttRepo.lastStaffID)
 	}
 
 	var body struct {
@@ -123,9 +79,9 @@ func TestGetMyTimetable_UsesJWTStaffLinkOnly(t *testing.T) {
 }
 
 func TestGetMyTimetable_NoStaffLinked(t *testing.T) {
-	ttRepo := &stubTimetableRepo{byStaff: map[uint][]models.Timetable{}}
-	staffRepo := &staffRepoWithUser{staff: nil}
-	r := newMyTimetableRouter(staffRepo, ttRepo)
+	staffRepo := newStubStaffRepo()
+	ttRepo := newStubTimetableRepo()
+	r := newMyTimetableRouter(staffRepo, ttRepo, 7, tenantA)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/protected/timetable/my", nil)
 	w := httptest.NewRecorder()
@@ -133,5 +89,37 @@ func TestGetMyTimetable_NoStaffLinked(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for user without linked staff, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestGetMyTimetable_CrossTenantStaffLink is the isolation test for this
+// endpoint: a session pinned to institution A must not resolve a staff record
+// that belongs to institution B, even though the user_id genuinely matches.
+// This is the case that plain user_id resolution would get wrong.
+func TestGetMyTimetable_CrossTenantStaffLink(t *testing.T) {
+	sessionUserID := uint(7)
+
+	staffRepo := newStubStaffRepo()
+	// The user's staff record lives at institution B.
+	staffRepo.seedStaff(&models.Staff{
+		ID: 42, Name: "Dr B-Staff", UserID: &sessionUserID, InstitutionID: tenantB,
+	})
+
+	ttRepo := newStubTimetableRepo()
+	ttRepo.seed(&models.Timetable{
+		StaffID: 42, InstitutionID: tenantB,
+		Day: models.Monday, StartTime: "08:00", EndTime: "09:00",
+	})
+
+	r := newMyTimetableRouter(staffRepo, ttRepo, sessionUserID, tenantA)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/protected/timetable/my", nil))
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 resolving a cross-tenant staff link, got %d body=%s", w.Code, w.Body.String())
+	}
+	if contains(w.Body.String(), "Dr B-Staff") {
+		t.Fatalf("response leaked another tenant's staff: %s", w.Body.String())
 	}
 }

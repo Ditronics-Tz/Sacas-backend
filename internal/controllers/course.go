@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -33,6 +32,8 @@ type UpdateCourseRequest struct {
 }
 
 func (c *CourseController) CreateCourse(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req CreateCourseRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
@@ -44,29 +45,32 @@ func (c *CourseController) CreateCourse(ctx *gin.Context) {
 		FacultyID:   req.FacultyID,
 		Description: req.Description,
 		Level:       req.Level,
+		// Stamped from the session, never from the payload.
+		InstitutionID: inst,
 	}
 
-	if err := c.courseRepo.Create(course); err != nil {
+	if err := c.courseRepo.Create(inst, course); err != nil {
 		logger.Error("Failed to create course: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create course"})
 		return
 	}
 
-	created, _ := c.courseRepo.GetByID(course.ID)
+	created, _ := c.courseRepo.GetByID(inst, course.ID)
 	ctx.JSON(http.StatusCreated, gin.H{"message": "Course created successfully", "course": created})
 }
 
 func (c *CourseController) GetCourse(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid course ID"})
 		return
 	}
 
-	course, err := c.courseRepo.GetByID(uint(id))
+	course, err := c.courseRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
+		respondRepoError(ctx, "Course not found", err)
 		return
 	}
 
@@ -74,13 +78,11 @@ func (c *CourseController) GetCourse(ctx *gin.Context) {
 }
 
 func (c *CourseController) GetAllCourses(ctx *gin.Context) {
-	limit, _ := strconv.Atoi(ctx.DefaultQuery("limit", "10"))
-	offset, _ := strconv.Atoi(ctx.DefaultQuery("offset", "0"))
-	if limit <= 0 {
-		limit = 10
-	}
+	inst := tenantID(ctx)
 
-	courses, err := c.courseRepo.GetAll(limit, offset)
+	limit, offset := parsePagination(ctx)
+
+	courses, err := c.courseRepo.GetAll(inst, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get courses: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get courses"})
@@ -91,8 +93,9 @@ func (c *CourseController) GetAllCourses(ctx *gin.Context) {
 }
 
 func (c *CourseController) UpdateCourse(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid course ID"})
 		return
@@ -104,9 +107,9 @@ func (c *CourseController) UpdateCourse(ctx *gin.Context) {
 		return
 	}
 
-	course, err := c.courseRepo.GetByID(uint(id))
+	course, err := c.courseRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Course not found"})
+		respondRepoError(ctx, "Course not found", err)
 		return
 	}
 
@@ -123,27 +126,28 @@ func (c *CourseController) UpdateCourse(ctx *gin.Context) {
 		course.Level = *req.Level
 	}
 
-	if err := c.courseRepo.Update(course); err != nil {
+	if err := c.courseRepo.Update(inst, course); err != nil {
 		logger.Error("Failed to update course: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update course"})
 		return
 	}
 
-	updated, _ := c.courseRepo.GetByID(course.ID)
+	updated, _ := c.courseRepo.GetByID(inst, course.ID)
 	ctx.JSON(http.StatusOK, gin.H{"message": "Course updated successfully", "course": updated})
 }
 
 func (c *CourseController) DeleteCourse(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid course ID"})
 		return
 	}
 
-	if err := c.courseRepo.Delete(uint(id)); err != nil {
+	if err := c.courseRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete course: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete course"})
+		respondRepoError(ctx, "Course not found", err)
 		return
 	}
 

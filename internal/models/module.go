@@ -20,21 +20,26 @@ func (m ModuleType) IsValid() bool {
 }
 
 type Module struct {
-	ID           uint           `gorm:"primaryKey" json:"id"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
-	Name         string         `gorm:"not null" json:"name" validate:"required,min=2,max=100"`
-	Code         string         `json:"code"`
-	CourseID     *uint          `json:"course_id"` // Nullable for general subjects
-	CreditHours  int            `gorm:"not null" json:"credit_hours" validate:"required,min=1,max=10"`
-	Type         ModuleType     `gorm:"not null" json:"type" validate:"required"`
-	RequiresLab  bool           `gorm:"default:false" json:"requires_lab"`
-	Semester     *int           `json:"semester"`
-	NtaLevel     string         `json:"nta_level"`
+	ID          uint           `gorm:"primaryKey" json:"id"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	Name        string         `gorm:"not null" json:"name" validate:"required,min=2,max=100"`
+	Code        string         `json:"code"`
+	CourseID    *uint          `json:"course_id"` // Nullable for general subjects
+	CreditHours int            `gorm:"not null" json:"credit_hours" validate:"required,min=1,max=10"`
+	Type        ModuleType     `gorm:"not null" json:"type" validate:"required"`
+	RequiresLab bool           `gorm:"default:false" json:"requires_lab"`
+	Semester    *int           `json:"semester"`
+	NtaLevel    string         `json:"nta_level"`
+
+	// InstitutionID is the owning tenant. Module codes are unique per
+	// institution, not globally.
+	InstitutionID uint `gorm:"not null;index" json:"institution_id"`
 
 	// Relationships
-	Course     *Course     `gorm:"foreignKey:CourseID" json:"course,omitempty"`
-	Staff      []Staff     `gorm:"many2many:staff_modules;" json:"staff,omitempty"`
-	Timetables []Timetable `json:"timetables,omitempty"`
+	Institution Institution `gorm:"foreignKey:InstitutionID" json:"institution,omitempty"`
+	Course      *Course     `gorm:"foreignKey:CourseID" json:"course,omitempty"`
+	Staff       []Staff     `gorm:"many2many:staff_modules;" json:"staff,omitempty"`
+	Timetables  []Timetable `json:"timetables,omitempty"`
 }

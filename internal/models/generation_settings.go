@@ -7,15 +7,28 @@ import (
 	"gorm.io/datatypes"
 )
 
-// GenerationSettings is the system-wide singleton for timetable generation
-// engine options (solver-tunable knobs). It is deliberately a SINGLE-ROW
-// table (fixed primary key ID = 1): the ticket scopes these settings to the
-// admin UI globally, with no per-course/per-class dimension mentioned.
-// Revisit if per-entity scoping is ever required.
+// GenerationSettings holds the timetable generation engine options
+// (solver-tunable knobs).
+//
+// There are two kinds of row:
+//
+//	Platform default (the single row with ID = SingletonID, InstitutionID = 0)
+//	    — the baseline every institution inherits.
+//	Per-institution override (InstitutionID > 0)
+//	    — an optional row an institution's admin may set. Any field it
+//	      overrides wins over the platform default; anything it leaves unset
+//	      falls back to the platform value.
+//
+// The platform row keeps the fixed primary key ID = 1 so existing deployments
+// and the singleton API shape are unaffected.
 type GenerationSettings struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+
+	// InstitutionID is the owning institution. Zero means the platform-wide
+	// default row, which is not itself an institution.
+	InstitutionID uint `gorm:"not null;default:0;index" json:"institution_id"`
 
 	// TimeBudgetSec bounds the solver's wall-clock budget per generation run.
 	// Validated server-side: > 0 and <= MaxTimeBudgetSec so a stray client
@@ -30,8 +43,12 @@ type GenerationSettings struct {
 }
 
 const (
-	// SingletonID is the fixed primary key of the single settings row.
+	// SingletonID is the fixed primary key of the platform default row.
 	SingletonID uint = 1
+
+	// PlatformScope is the InstitutionID of the platform default row. It is
+	// never a real institution ID — real institutions start at 1.
+	PlatformScope uint = 0
 
 	// DefaultTimeBudgetSec is the value hardcoded in buildSolverRequest today.
 	DefaultTimeBudgetSec = 30.0
@@ -49,11 +66,12 @@ var AllowedSoftWeightKeys = []string{
 	"session_spread_weight",
 }
 
-// DefaultGenerationSettings returns a populated singleton with the same
+// DefaultGenerationSettings returns a populated platform default with the same
 // defaults hardcoded in the service today (30s budget, no soft weights).
 func DefaultGenerationSettings() *GenerationSettings {
 	return &GenerationSettings{
 		ID:            SingletonID,
+		InstitutionID: PlatformScope,
 		TimeBudgetSec: DefaultTimeBudgetSec,
 		SoftWeights:   datatypes.JSON(`{}`),
 	}

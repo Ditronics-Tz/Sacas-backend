@@ -14,7 +14,17 @@ import (
 
 // RunMigrations runs all database migrations
 func RunMigrations(db *gorm.DB) error {
+	// Phase 1: structural steps AutoMigrate cannot express on a table that
+	// already has rows (add nullable column, backfill, then set NOT NULL).
+	// Must run first so the models below already match the database.
+	if err := RunPreAutoMigrateMigrations(db); err != nil {
+		log.Printf("pre-migrate migration failed: %v", err)
+		return err
+	}
+
+	// Phase 2: GORM schema sync.
 	err := db.AutoMigrate(
+		&models.Institution{},
 		&models.User{},
 		&models.Faculty{},
 		&models.Staff{},
@@ -31,12 +41,9 @@ func RunMigrations(db *gorm.DB) error {
 		return err
 	}
 
-	// Soft-delete aware unique constraints: plain UNIQUE fails after a
-	// soft-delete (row still occupies the unique slot). Replace with
-	// partial unique indexes WHERE deleted_at IS NULL so deleting then
-	// re-creating (or CSV re-importing) the same email/phone succeeds.
-	if err := ensurePartialUniqueIndexes(db); err != nil {
-		log.Printf("partial unique index migration failed: %v", err)
+	// Phase 3: indexes and constraints GORM does not model.
+	if err := RunPostAutoMigrateMigrations(db); err != nil {
+		log.Printf("post-migrate migration failed: %v", err)
 		return err
 	}
 
@@ -64,6 +71,10 @@ func ensurePartialUniqueIndexes(db *gorm.DB) error {
 	db.Exec(`DROP INDEX IF EXISTS idx_users_email`)
 	db.Exec(`DROP INDEX IF EXISTS idx_users_phone_number`)
 	db.Exec(`DROP INDEX IF EXISTS idx_staffs_email`)
+	// Staff email is no longer globally unique — uniqueness moved to
+	// (institution_id, email). The per-tenant index is created in
+	// ensureTenantUniqueIndexes.
+	db.Exec(`DROP INDEX IF EXISTS idx_staffs_email_active`)
 
 	// Create partial unique indexes — only rows where deleted_at IS NULL participate
 	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_active ON users(email) WHERE deleted_at IS NULL`).Error; err != nil {
@@ -73,20 +84,23 @@ func ensurePartialUniqueIndexes(db *gorm.DB) error {
 	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_active ON users(phone_number) WHERE deleted_at IS NULL AND phone_number IS NOT NULL AND phone_number <> ''`).Error; err != nil {
 		return err
 	}
-	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_staffs_email_active ON staffs(email) WHERE deleted_at IS NULL`).Error; err != nil {
-		return err
-	}
 	return nil
 }
 
 // BackfillStaffUserLinks idempotently sets staff.user_id from matching user
 // emails. Safe to run on every boot; existing links are never overwritten.
+//
+// The match is scoped to the institution: a staff record is only linked to a
+// user account belonging to the same institution, so a shared email address
+// at two institutions can never link across tenants.
 func BackfillStaffUserLinks(db *gorm.DB) error {
 	result := db.Model(&models.Staff{}).
 		Where("user_id IS NULL AND deleted_at IS NULL").
-		Where("email IN (?)", db.Model(&models.User{}).Select("email").Where("deleted_at IS NULL")).
+		Where(`email IN (?)`, db.Model(&models.User{}).
+			Select("email").
+			Where("deleted_at IS NULL AND institution_id = staffs.institution_id")).
 		Update("user_id", db.Model(&models.User{}).Select("id").
-			Where("users.email = staffs.email AND users.deleted_at IS NULL"))
+			Where("users.email = staffs.email AND users.deleted_at IS NULL AND users.institution_id = staffs.institution_id"))
 	if result.Error != nil {
 		return result.Error
 	}
@@ -101,7 +115,9 @@ const demoPasswordHash = "$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uhe
 
 // BootstrapSuperAdmin creates the first super_admin from env if none exists.
 // Env: SUPERADMIN_EMAIL, SUPERADMIN_PASSWORD (must satisfy password policy),
-//      optionally SUPERADMIN_FIRST_NAME / SUPERADMIN_LAST_NAME / SUPERADMIN_PHONE.
+//
+//	optionally SUPERADMIN_FIRST_NAME / SUPERADMIN_LAST_NAME / SUPERADMIN_PHONE.
+//
 // In production, if no super_admin exists and env is missing, it returns an error
 // so the operator knows to set the vars. In development it is a no-op.
 func BootstrapSuperAdmin(db *gorm.DB) error {
@@ -165,6 +181,10 @@ func CreateInitialData(db *gorm.DB) error {
 		log.Printf("SEED_DEMO disabled (ENV=%s) — set SEED_DEMO=true to seed demo users", env)
 		return nil
 	}
+	// Demo data lands in the default institution, which the tenancy migration
+	// has already created. The platform super_admin stays unbound (NULL) so it
+	// can still administer every tenant.
+	defaultInstID := models.DefaultInstitutionID
 	// Distinct phone numbers required (empty string is unique-constrained in DB)
 	demos := []models.User{
 		{
@@ -176,6 +196,8 @@ func CreateInitialData(db *gorm.DB) error {
 			Role:        models.RoleSuperAdmin,
 			IsActive:    true,
 			IsVerified:  true,
+			// Platform-level: spans all institutions.
+			InstitutionID: nil,
 		},
 		{
 			Email:       "coordinator@sacas.local",
@@ -186,36 +208,41 @@ func CreateInitialData(db *gorm.DB) error {
 			Role:        models.RoleAdmin,
 			IsActive:    true,
 			IsVerified:  true,
+			// Tenant-scoped demo accounts all live in the default institution.
+			InstitutionID: &defaultInstID,
 		},
 		{
-			Email:       "scheduler@sacas.local",
-			Password:    demoPasswordHash,
-			FirstName:   "Timetable",
-			LastName:    "Officer",
-			PhoneNumber: "+255700000003",
-			Role:        models.RoleAdmin,
-			IsActive:    true,
-			IsVerified:  true,
+			Email:         "scheduler@sacas.local",
+			Password:      demoPasswordHash,
+			FirstName:     "Timetable",
+			LastName:      "Officer",
+			PhoneNumber:   "+255700000003",
+			Role:          models.RoleAdmin,
+			IsActive:      true,
+			IsVerified:    true,
+			InstitutionID: &defaultInstID,
 		},
 		{
-			Email:       "lecturer@sacas.local",
-			Password:    demoPasswordHash,
-			FirstName:   "Jane",
-			LastName:    "Lecturer",
-			PhoneNumber: "+255700000004",
-			Role:        models.RoleUser,
-			IsActive:    true,
-			IsVerified:  true,
+			Email:         "lecturer@sacas.local",
+			Password:      demoPasswordHash,
+			FirstName:     "Jane",
+			LastName:      "Lecturer",
+			PhoneNumber:   "+255700000004",
+			Role:          models.RoleUser,
+			IsActive:      true,
+			IsVerified:    true,
+			InstitutionID: &defaultInstID,
 		},
 		{
-			Email:       "viewer@sacas.local",
-			Password:    demoPasswordHash,
-			FirstName:   "View",
-			LastName:    "Only",
-			PhoneNumber: "+255700000005",
-			Role:        models.RoleUser,
-			IsActive:    true,
-			IsVerified:  true,
+			Email:         "viewer@sacas.local",
+			Password:      demoPasswordHash,
+			FirstName:     "View",
+			LastName:      "Only",
+			PhoneNumber:   "+255700000005",
+			Role:          models.RoleUser,
+			IsActive:      true,
+			IsVerified:    true,
+			InstitutionID: &defaultInstID,
 		},
 	}
 
@@ -240,6 +267,9 @@ func CreateInitialData(db *gorm.DB) error {
 		existing.FirstName = u.FirstName
 		existing.LastName = u.LastName
 		existing.PhoneNumber = u.PhoneNumber
+		// Keep the demo tenant assignment in sync so a re-seed after the
+		// tenancy migration does not leave a tenant user unbound.
+		existing.InstitutionID = u.InstitutionID
 		if err := db.Save(&existing).Error; err != nil {
 			log.Printf("Failed to refresh demo user %s: %v", u.Email, err)
 			return err
@@ -251,17 +281,18 @@ func CreateInitialData(db *gorm.DB) error {
 // DropAllTables drops all tables (use with caution)
 func DropAllTables(db *gorm.DB) error {
 	log.Println("Dropping all tables...")
-	
+
 	return db.Migrator().DropTable(
-		&models.User{},
-		&models.Faculty{},
-		&models.Staff{},
-		&models.Course{},
-		&models.Module{},
-		&models.Class{},
-		&models.Room{},
-		&models.Subject{},
 		&models.Timetable{},
+		&models.Subject{},
+		&models.Room{},
+		&models.Class{},
+		&models.Module{},
+		&models.Course{},
+		&models.Staff{},
+		&models.Faculty{},
+		&models.User{},
 		&models.GenerationSettings{},
+		&models.Institution{},
 	)
 }

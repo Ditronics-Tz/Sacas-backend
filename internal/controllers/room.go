@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -35,6 +34,8 @@ type UpdateRoomRequest struct {
 }
 
 func (c *RoomController) CreateRoom(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req CreateRoomRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
@@ -45,6 +46,8 @@ func (c *RoomController) CreateRoom(ctx *gin.Context) {
 		Name:     req.Name,
 		Capacity: req.Capacity,
 		Sticky:   req.Sticky,
+		// Stamped from the session, never from the payload.
+		InstitutionID: inst,
 	}
 
 	if req.Features != "" {
@@ -54,27 +57,28 @@ func (c *RoomController) CreateRoom(ctx *gin.Context) {
 		room.AllowedCourses = []byte(req.AllowedCourses)
 	}
 
-	if err := c.roomRepo.Create(room); err != nil {
+	if err := c.roomRepo.Create(inst, room); err != nil {
 		logger.Error("Failed to create room: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create room"})
 		return
 	}
 
-	created, _ := c.roomRepo.GetByID(room.ID)
+	created, _ := c.roomRepo.GetByID(inst, room.ID)
 	ctx.JSON(http.StatusCreated, gin.H{"message": "Room created successfully", "room": created})
 }
 
 func (c *RoomController) GetRoom(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid room ID"})
 		return
 	}
 
-	room, err := c.roomRepo.GetByID(uint(id))
+	room, err := c.roomRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Room not found"})
+		respondRepoError(ctx, "Room not found", err)
 		return
 	}
 
@@ -82,13 +86,11 @@ func (c *RoomController) GetRoom(ctx *gin.Context) {
 }
 
 func (c *RoomController) GetAllRooms(ctx *gin.Context) {
-	limit, _ := strconv.Atoi(ctx.DefaultQuery("limit", "10"))
-	offset, _ := strconv.Atoi(ctx.DefaultQuery("offset", "0"))
-	if limit <= 0 {
-		limit = 10
-	}
+	inst := tenantID(ctx)
 
-	rooms, err := c.roomRepo.GetAll(limit, offset)
+	limit, offset := parsePagination(ctx)
+
+	rooms, err := c.roomRepo.GetAll(inst, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get rooms: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get rooms"})
@@ -99,8 +101,9 @@ func (c *RoomController) GetAllRooms(ctx *gin.Context) {
 }
 
 func (c *RoomController) UpdateRoom(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid room ID"})
 		return
@@ -112,9 +115,9 @@ func (c *RoomController) UpdateRoom(ctx *gin.Context) {
 		return
 	}
 
-	room, err := c.roomRepo.GetByID(uint(id))
+	room, err := c.roomRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Room not found"})
+		respondRepoError(ctx, "Room not found", err)
 		return
 	}
 
@@ -134,27 +137,28 @@ func (c *RoomController) UpdateRoom(ctx *gin.Context) {
 		room.AllowedCourses = []byte(*req.AllowedCourses)
 	}
 
-	if err := c.roomRepo.Update(room); err != nil {
+	if err := c.roomRepo.Update(inst, room); err != nil {
 		logger.Error("Failed to update room: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update room"})
 		return
 	}
 
-	updated, _ := c.roomRepo.GetByID(room.ID)
+	updated, _ := c.roomRepo.GetByID(inst, room.ID)
 	ctx.JSON(http.StatusOK, gin.H{"message": "Room updated successfully", "room": updated})
 }
 
 func (c *RoomController) DeleteRoom(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid room ID"})
 		return
 	}
 
-	if err := c.roomRepo.Delete(uint(id)); err != nil {
+	if err := c.roomRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete room: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete room"})
+		respondRepoError(ctx, "Room not found", err)
 		return
 	}
 

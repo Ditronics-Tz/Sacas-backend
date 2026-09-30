@@ -6,13 +6,15 @@ import (
 	"gorm.io/gorm"
 )
 
+// SubjectRepository is tenant-scoped: every method takes an institutionID as
+// its first argument. Pass PlatformScope (0) only for a platform super_admin.
 type SubjectRepository interface {
-	Create(subject *models.Subject) error
-	GetByID(id uint) (*models.Subject, error)
-	Update(subject *models.Subject) error
-	Delete(id uint) error
-	GetAll(limit, offset int) ([]models.Subject, error)
-	GetByCreditHours(creditHours int) ([]models.Subject, error)
+	Create(institutionID uint, subject *models.Subject) error
+	GetByID(institutionID, id uint) (*models.Subject, error)
+	Update(institutionID uint, subject *models.Subject) error
+	Delete(institutionID, id uint) error
+	GetAll(institutionID uint, limit, offset int) ([]models.Subject, error)
+	GetByCreditHours(institutionID uint, creditHours int) ([]models.Subject, error)
 }
 
 type subjectRepository struct {
@@ -23,35 +25,64 @@ func NewSubjectRepository(db *gorm.DB) SubjectRepository {
 	return &subjectRepository{db: db}
 }
 
-func (r *subjectRepository) Create(subject *models.Subject) error {
+func (r *subjectRepository) Create(institutionID uint, subject *models.Subject) error {
+	if subject == nil {
+		return gorm.ErrInvalidValue
+	}
+	if !IsPlatformScope(institutionID) {
+		subject.InstitutionID = institutionID
+	}
 	return r.db.Create(subject).Error
 }
 
-func (r *subjectRepository) GetByID(id uint) (*models.Subject, error) {
+func (r *subjectRepository) GetByID(institutionID, id uint) (*models.Subject, error) {
 	var subject models.Subject
-	err := r.db.First(&subject, id).Error
+	err := TenantScope(r.db, institutionID).First(&subject, id).Error
 	if err != nil {
 		return nil, err
 	}
 	return &subject, nil
 }
 
-func (r *subjectRepository) Update(subject *models.Subject) error {
-	return r.db.Save(subject).Error
+func (r *subjectRepository) Update(institutionID uint, subject *models.Subject) error {
+	if subject == nil {
+		return gorm.ErrInvalidValue
+	}
+	res := TenantScope(r.db.Model(&models.Subject{}), institutionID).
+		Where("id = ?", subject.ID).
+		Updates(map[string]any{
+			"name":         subject.Name,
+			"credit_hours": subject.CreditHours,
+			"updated_at":   gorm.Expr("now()"),
+		})
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
-func (r *subjectRepository) Delete(id uint) error {
-	return r.db.Delete(&models.Subject{}, id).Error
+func (r *subjectRepository) Delete(institutionID, id uint) error {
+	res := TenantScope(r.db, institutionID).Delete(&models.Subject{}, id)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
-func (r *subjectRepository) GetAll(limit, offset int) ([]models.Subject, error) {
+func (r *subjectRepository) GetAll(institutionID uint, limit, offset int) ([]models.Subject, error) {
 	var subjects []models.Subject
-	err := r.db.Limit(limit).Offset(offset).Find(&subjects).Error
+	err := TenantScope(r.db, institutionID).Limit(limit).Offset(offset).Find(&subjects).Error
 	return subjects, err
 }
 
-func (r *subjectRepository) GetByCreditHours(creditHours int) ([]models.Subject, error) {
+func (r *subjectRepository) GetByCreditHours(institutionID uint, creditHours int) ([]models.Subject, error) {
 	var subjects []models.Subject
-	err := r.db.Where("credit_hours = ?", creditHours).Find(&subjects).Error
+	err := TenantScope(r.db, institutionID).Where("credit_hours = ?", creditHours).Find(&subjects).Error
 	return subjects, err
 }

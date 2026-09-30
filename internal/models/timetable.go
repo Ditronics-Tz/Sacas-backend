@@ -28,19 +28,24 @@ type Timetable struct {
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
-	
+
 	// Foreign Keys
 	ClassID   uint  `gorm:"not null" json:"class_id" validate:"required"`
 	ModuleID  *uint `json:"module_id"`  // Nullable for general subjects
 	SubjectID *uint `json:"subject_id"` // Nullable for course modules
 	StaffID   uint  `gorm:"not null" json:"staff_id" validate:"required"`
 	RoomID    uint  `gorm:"not null" json:"room_id" validate:"required"`
-	
+
+	// InstitutionID is the owning tenant. Denormalised from the class on write
+	// so timetable reads and conflict checks never need a join to enforce
+	// tenant isolation.
+	InstitutionID uint `gorm:"not null;index" json:"institution_id"`
+
 	// Schedule
 	Day       Weekday `gorm:"not null" json:"day" validate:"required"`
 	StartTime string  `gorm:"not null" json:"start_time" validate:"required"` // Format: "HH:MM"
 	EndTime   string  `gorm:"not null" json:"end_time" validate:"required"`   // Format: "HH:MM"
-	
+
 	// Relationships
 	Class   Class    `gorm:"foreignKey:ClassID" json:"class,omitempty"`
 	Module  *Module  `gorm:"foreignKey:ModuleID" json:"module,omitempty"`

@@ -16,8 +16,13 @@ type Course struct {
 	Description string         `json:"description"`
 	Level       string         `json:"level"` // e.g. diploma, degree, NTA Level 6
 
+	// InstitutionID is the owning tenant. Course names are unique per
+	// institution, not globally.
+	InstitutionID uint `gorm:"not null;index" json:"institution_id"`
+
 	// Relationships
-	Faculty Faculty  `gorm:"foreignKey:FacultyID" json:"faculty,omitempty"`
-	Modules []Module `json:"modules,omitempty"`
-	Classes []Class  `json:"classes,omitempty"`
+	Institution Institution `gorm:"foreignKey:InstitutionID" json:"institution,omitempty"`
+	Faculty     Faculty     `gorm:"foreignKey:FacultyID" json:"faculty,omitempty"`
+	Modules     []Module    `gorm:"foreignKey:CourseID" json:"modules,omitempty"`
+	Classes     []Class     `gorm:"foreignKey:CourseID" json:"classes,omitempty"`
 }

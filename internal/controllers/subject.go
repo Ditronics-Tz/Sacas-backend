@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -29,6 +28,8 @@ type UpdateSubjectRequest struct {
 }
 
 func (c *SubjectController) CreateSubject(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req CreateSubjectRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
@@ -38,9 +39,12 @@ func (c *SubjectController) CreateSubject(ctx *gin.Context) {
 	subject := &models.Subject{
 		Name:        req.Name,
 		CreditHours: req.CreditHours,
+		// Stamped from the session, never from the payload. General subjects
+		// are per-institution catalogue entries, not shared platform rows.
+		InstitutionID: inst,
 	}
 
-	if err := c.subjectRepo.Create(subject); err != nil {
+	if err := c.subjectRepo.Create(inst, subject); err != nil {
 		logger.Error("Failed to create subject: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create subject"})
 		return
@@ -50,15 +54,17 @@ func (c *SubjectController) CreateSubject(ctx *gin.Context) {
 }
 
 func (c *SubjectController) GetSubject(ctx *gin.Context) {
-	id, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid subject ID"})
 		return
 	}
 
-	subject, err := c.subjectRepo.GetByID(uint(id))
+	subject, err := c.subjectRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Subject not found"})
+		respondRepoError(ctx, "Subject not found", err)
 		return
 	}
 
@@ -66,13 +72,11 @@ func (c *SubjectController) GetSubject(ctx *gin.Context) {
 }
 
 func (c *SubjectController) GetAllSubjects(ctx *gin.Context) {
-	limit, _ := strconv.Atoi(ctx.DefaultQuery("limit", "10"))
-	offset, _ := strconv.Atoi(ctx.DefaultQuery("offset", "0"))
-	if limit <= 0 {
-		limit = 10
-	}
+	inst := tenantID(ctx)
 
-	subjects, err := c.subjectRepo.GetAll(limit, offset)
+	limit, offset := parsePagination(ctx)
+
+	subjects, err := c.subjectRepo.GetAll(inst, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get subjects: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get subjects"})
@@ -83,7 +87,9 @@ func (c *SubjectController) GetAllSubjects(ctx *gin.Context) {
 }
 
 func (c *SubjectController) UpdateSubject(ctx *gin.Context) {
-	id, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid subject ID"})
 		return
@@ -95,9 +101,9 @@ func (c *SubjectController) UpdateSubject(ctx *gin.Context) {
 		return
 	}
 
-	subject, err := c.subjectRepo.GetByID(uint(id))
+	subject, err := c.subjectRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Subject not found"})
+		respondRepoError(ctx, "Subject not found", err)
 		return
 	}
 
@@ -108,7 +114,7 @@ func (c *SubjectController) UpdateSubject(ctx *gin.Context) {
 		subject.CreditHours = *req.CreditHours
 	}
 
-	if err := c.subjectRepo.Update(subject); err != nil {
+	if err := c.subjectRepo.Update(inst, subject); err != nil {
 		logger.Error("Failed to update subject: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update subject"})
 		return
@@ -118,15 +124,17 @@ func (c *SubjectController) UpdateSubject(ctx *gin.Context) {
 }
 
 func (c *SubjectController) DeleteSubject(ctx *gin.Context) {
-	id, err := strconv.ParseUint(ctx.Param("id"), 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid subject ID"})
 		return
 	}
 
-	if err := c.subjectRepo.Delete(uint(id)); err != nil {
+	if err := c.subjectRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete subject: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete subject"})
+		respondRepoError(ctx, "Subject not found", err)
 		return
 	}
 

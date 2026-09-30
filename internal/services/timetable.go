@@ -10,10 +10,15 @@ import (
 	"go_boilerplate/internal/models"
 	"go_boilerplate/internal/repositories"
 	"go_boilerplate/pkg/logger"
+	"gorm.io/gorm"
 )
 
 // ErrInfeasible is returned when hard constraints cannot be satisfied.
 var ErrInfeasible = errors.New("timetable infeasible")
+
+// ErrClassNotInInstitution is returned when the requested class does not
+// belong to the calling tenant. Callers surface it as 404.
+var ErrClassNotInInstitution = errors.New("class not found in this institution")
 
 type TimetableService struct {
 	timetableRepo repositories.TimetableRepository
@@ -63,18 +68,22 @@ type GenerateResult struct {
 }
 
 // GenerateTimetable generates and persists a timetable for a class (replace-on-write).
-func (s *TimetableService) GenerateTimetable(classID uint) (*GenerateResult, error) {
-	return s.generate(classID, true)
+//
+// institutionID is the caller's tenant, resolved server-side from the
+// authenticated user. It is never taken from the request body, so a caller
+// cannot generate against another institution's class, staff, or rooms.
+func (s *TimetableService) GenerateTimetable(institutionID, classID uint) (*GenerateResult, error) {
+	return s.generate(institutionID, classID, true)
 }
 
 // PreviewTimetable runs the solver (or greedy) without persisting.
-func (s *TimetableService) PreviewTimetable(classID uint) (*GenerateResult, error) {
-	return s.generate(classID, false)
+func (s *TimetableService) PreviewTimetable(institutionID, classID uint) (*GenerateResult, error) {
+	return s.generate(institutionID, classID, false)
 }
 
-func (s *TimetableService) generate(classID uint, persist bool) (*GenerateResult, error) {
+func (s *TimetableService) generate(institutionID, classID uint, persist bool) (*GenerateResult, error) {
 	if s.solver != nil && s.solver.Enabled() {
-		result, err := s.generateWithSolver(classID, persist)
+		result, err := s.generateWithSolver(institutionID, classID, persist)
 		if err == nil {
 			return result, nil
 		}
@@ -84,7 +93,7 @@ func (s *TimetableService) generate(classID uint, persist bool) (*GenerateResult
 		}
 		if errors.Is(err, ErrSolverUnreachable) && s.solver.AllowFallback() {
 			logger.Warn("Solver unreachable for class %d: %v — greedy fallback", classID, err)
-			return s.generateGreedy(classID, persist)
+			return s.generateGreedy(institutionID, classID, persist)
 		}
 		// Other solver errors without fallback
 		if result != nil {
@@ -93,11 +102,11 @@ func (s *TimetableService) generate(classID uint, persist bool) (*GenerateResult
 		return nil, err
 	}
 
-	return s.generateGreedy(classID, persist)
+	return s.generateGreedy(institutionID, classID, persist)
 }
 
-func (s *TimetableService) generateWithSolver(classID uint, persist bool) (*GenerateResult, error) {
-	req, err := s.buildSolverRequest(classID, persist)
+func (s *TimetableService) generateWithSolver(institutionID, classID uint, persist bool) (*GenerateResult, error) {
+	req, err := s.buildSolverRequest(institutionID, classID, persist)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +141,7 @@ func (s *TimetableService) generateWithSolver(classID uint, persist bool) (*Gene
 
 	var timetables []models.Timetable
 	if persist {
-		timetables, err = s.timetableRepo.ReplaceClassTimetable(classID, pending)
+		timetables, err = s.timetableRepo.ReplaceClassTimetable(institutionID, classID, pending)
 		if err != nil {
 			return nil, fmt.Errorf("failed to persist assignments: %w", err)
 		}
@@ -150,10 +159,27 @@ func (s *TimetableService) generateWithSolver(classID uint, persist bool) (*Gene
 	}, nil
 }
 
-func (s *TimetableService) buildSolverRequest(classID uint, persist bool) (*SolverRequest, error) {
-	class, err := s.classRepo.GetByID(classID)
+// resolveClass loads the class and confirms it belongs to institutionID. This
+// is the single gate that stops a generation request from reaching another
+// tenant's data.
+func (s *TimetableService) resolveClass(institutionID, classID uint) (*models.Class, error) {
+	class, err := s.classRepo.GetByID(institutionID, classID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("%w: class %d", ErrClassNotInInstitution, classID)
+		}
 		return nil, fmt.Errorf("failed to get class: %w", err)
+	}
+	return class, nil
+}
+
+// buildSolverRequest assembles the solver payload from the class's institution
+// only. Every read below is tenant-scoped, so institution A's staff, rooms,
+// modules, and general subjects can never appear in institution B's request.
+func (s *TimetableService) buildSolverRequest(institutionID, classID uint, persist bool) (*SolverRequest, error) {
+	class, err := s.resolveClass(institutionID, classID)
+	if err != nil {
+		return nil, err
 	}
 
 	// Curriculum source of truth:
@@ -161,27 +187,27 @@ func (s *TimetableService) buildSolverRequest(classID uint, persist bool) (*Solv
 	// - general_subject modules (type general_subject / null course_id)
 	// Subjects table is NOT double-scheduled when modules of type general_subject exist;
 	// only use Subject rows when no general_subject modules are present (legacy).
-	modules, err := s.moduleRepo.GetByCourse(class.CourseID, 200, 0)
+	modules, err := s.moduleRepo.GetByCourse(institutionID, class.CourseID, 200, 0)
 	if err != nil {
 		return nil, err
 	}
-	generalMods, _ := s.moduleRepo.GetGeneralModules(200, 0)
+	generalMods, _ := s.moduleRepo.GetGeneralModules(institutionID, 200, 0)
 	modules = append(modules, generalMods...)
 
 	var subjects []models.Subject
 	if len(generalMods) == 0 {
-		subjects, err = s.subjectRepo.GetAll(200, 0)
+		subjects, err = s.subjectRepo.GetAll(institutionID, 200, 0)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	staffList, err := s.staffRepo.GetAll(500, 0)
+	staffList, err := s.staffRepo.GetAll(institutionID, 500, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	rooms, err := s.roomRepo.GetAll(500, 0)
+	rooms, err := s.roomRepo.GetAll(institutionID, 500, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -194,10 +220,11 @@ func (s *TimetableService) buildSolverRequest(classID uint, persist bool) (*Solv
 	//     because no admin has visited the settings page.
 	//   - any other repository error (DB down) → fail loudly; silently using
 	//     defaults could mask a production issue.
+	// The institution's own override wins over the platform default.
 	timeBudgetSec := 30.0
 	var softWeights map[string]float64
 	if s.generationSettingsRepo != nil {
-		settings, err := s.generationSettingsRepo.Get()
+		settings, err := s.generationSettingsRepo.GetForInstitution(class.InstitutionID)
 		if err != nil && !errors.Is(err, repositories.ErrNotConfigured) {
 			return nil, fmt.Errorf("failed to load generation settings: %w", err)
 		}
@@ -236,7 +263,7 @@ func (s *TimetableService) buildSolverRequest(classID uint, persist bool) (*Solv
 		})
 	}
 	for _, st := range staffList {
-		withMods, _ := s.staffRepo.GetWithModules(st.ID)
+		withMods, _ := s.staffRepo.GetWithModules(institutionID, st.ID)
 		var modIDs []uint
 		if withMods != nil {
 			for _, m := range withMods.Modules {
@@ -306,23 +333,24 @@ func roomAllowedCourses(raw []byte) []uint {
 }
 
 // generateGreedy is the legacy first-fit engine (used when solver is off/unreachable with fallback).
-func (s *TimetableService) generateGreedy(classID uint, persist bool) (*GenerateResult, error) {
-	class, err := s.classRepo.GetByID(classID)
+// Like the solver path, every read is scoped to institutionID.
+func (s *TimetableService) generateGreedy(institutionID, classID uint, persist bool) (*GenerateResult, error) {
+	class, err := s.resolveClass(institutionID, classID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get class: %w", err)
+		return nil, err
 	}
 
-	modules, err := s.moduleRepo.GetByCourse(class.CourseID, 100, 0)
+	modules, err := s.moduleRepo.GetByCourse(institutionID, class.CourseID, 100, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get modules: %w", err)
 	}
-	generalMods, _ := s.moduleRepo.GetGeneralModules(100, 0)
+	generalMods, _ := s.moduleRepo.GetGeneralModules(institutionID, 100, 0)
 	modules = append(modules, generalMods...)
 
 	// Align with solver: subjects table only if no general_subject modules
 	var subjects []models.Subject
 	if len(generalMods) == 0 {
-		subjects, err = s.subjectRepo.GetAll(100, 0)
+		subjects, err = s.subjectRepo.GetAll(institutionID, 100, 0)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get subjects: %w", err)
 		}
@@ -338,10 +366,10 @@ func (s *TimetableService) generateGreedy(classID uint, persist bool) (*Generate
 	var unsat []string
 	required := 0
 
-	// Seed staff hours from DB
-	allStaff, _ := s.staffRepo.GetAll(500, 0)
+	// Seed staff hours from DB, counting only this institution's bookings.
+	allStaff, _ := s.staffRepo.GetAll(institutionID, 500, 0)
 	for _, st := range allStaff {
-		existing, _ := s.timetableRepo.GetByStaff(st.ID)
+		existing, _ := s.timetableRepo.GetByStaff(institutionID, st.ID)
 		// exclude current class if we will replace
 		count := 0
 		for _, e := range existing {
@@ -355,7 +383,7 @@ func (s *TimetableService) generateGreedy(classID uint, persist bool) (*Generate
 	trySchedule := func(moduleID, subjectID *uint, students int, requiresLab bool, label string) {
 		required++
 		tt, err := s.scheduleSessionInMemory(
-			classID, moduleID, subjectID, workingDays, timeSlots,
+			institutionID, classID, moduleID, subjectID, workingDays, timeSlots,
 			students, requiresLab, pending, staffHours, classID,
 		)
 		if err != nil {
@@ -394,7 +422,7 @@ func (s *TimetableService) generateGreedy(classID uint, persist bool) (*Generate
 
 	var timetables []models.Timetable
 	if persist {
-		timetables, err = s.timetableRepo.ReplaceClassTimetable(classID, pending)
+		timetables, err = s.timetableRepo.ReplaceClassTimetable(institutionID, classID, pending)
 		if err != nil {
 			return nil, fmt.Errorf("failed to persist: %w", err)
 		}
@@ -412,6 +440,7 @@ func (s *TimetableService) generateGreedy(classID uint, persist bool) (*Generate
 }
 
 func (s *TimetableService) scheduleSessionInMemory(
+	institutionID uint,
 	classID uint,
 	moduleID, subjectID *uint,
 	workingDays []models.Weekday,
@@ -429,20 +458,20 @@ func (s *TimetableService) scheduleSessionInMemory(
 			var staffID uint
 			var err error
 			if moduleID != nil {
-				staffID, err = s.findAvailableStaffForModule(*moduleID, day, startTime, endTime, pending, staffHours, regenClassID)
+				staffID, err = s.findAvailableStaffForModule(institutionID, *moduleID, day, startTime, endTime, pending, staffHours, regenClassID)
 			} else {
-				staffID, err = s.findAvailableStaffForSubject(day, startTime, endTime, pending, staffHours, regenClassID)
+				staffID, err = s.findAvailableStaffForSubject(institutionID, day, startTime, endTime, pending, staffHours, regenClassID)
 			}
 			if err != nil {
 				continue
 			}
 
-			roomID, err := s.findAvailableRoom(day, startTime, endTime, studentCount, requiresLab, pending, regenClassID)
+			roomID, err := s.findAvailableRoom(institutionID, day, startTime, endTime, studentCount, requiresLab, pending, regenClassID)
 			if err != nil {
 				continue
 			}
 
-			if s.slotConflicts(classID, staffID, roomID, day, startTime, endTime, pending, regenClassID) {
+			if s.slotConflicts(institutionID, classID, staffID, roomID, day, startTime, endTime, pending, regenClassID) {
 				continue
 			}
 
@@ -461,8 +490,8 @@ func (s *TimetableService) scheduleSessionInMemory(
 	return nil, errors.New("no feasible slot")
 }
 
-func (s *TimetableService) slotConflicts(classID, staffID, roomID uint, day models.Weekday, start, end string, pending []models.Timetable, regenClassID uint) bool {
-	conflicts, err := s.timetableRepo.CheckConflicts(classID, staffID, roomID, day, start, end, 0)
+func (s *TimetableService) slotConflicts(institutionID, classID, staffID, roomID uint, day models.Weekday, start, end string, pending []models.Timetable, regenClassID uint) bool {
+	conflicts, err := s.timetableRepo.CheckConflicts(institutionID, classID, staffID, roomID, day, start, end, 0)
 	if err == nil {
 		for _, c := range conflicts {
 			if regenClassID > 0 && c.ClassID == regenClassID {
@@ -486,6 +515,7 @@ func (s *TimetableService) slotConflicts(classID, staffID, roomID uint, day mode
 }
 
 func (s *TimetableService) findAvailableStaffForModule(
+	institutionID uint,
 	moduleID uint,
 	day models.Weekday,
 	startTime, endTime string,
@@ -493,7 +523,9 @@ func (s *TimetableService) findAvailableStaffForModule(
 	staffHours map[uint]int,
 	regenClassID uint,
 ) (uint, error) {
-	module, err := s.moduleRepo.GetWithStaff(moduleID)
+	// GetWithStaff is tenant-scoped, so a module from another institution
+	// resolves to no staff at all rather than to that institution's lecturers.
+	module, err := s.moduleRepo.GetWithStaff(institutionID, moduleID)
 	if err != nil {
 		return 0, err
 	}
@@ -501,7 +533,7 @@ func (s *TimetableService) findAvailableStaffForModule(
 		return 0, fmt.Errorf("module %d has no allocated staff (assign staff↔module first)", moduleID)
 	}
 	for _, staff := range module.Staff {
-		if s.isStaffAvailable(staff.ID, day, startTime, endTime, pending, staffHours, staff.MaxHours, regenClassID) {
+		if s.isStaffAvailable(institutionID, staff.ID, day, startTime, endTime, pending, staffHours, staff.MaxHours, regenClassID) {
 			return staff.ID, nil
 		}
 	}
@@ -509,18 +541,21 @@ func (s *TimetableService) findAvailableStaffForModule(
 }
 
 func (s *TimetableService) findAvailableStaffForSubject(
+	institutionID uint,
 	day models.Weekday,
 	startTime, endTime string,
 	pending []models.Timetable,
 	staffHours map[uint]int,
 	regenClassID uint,
 ) (uint, error) {
-	staff, err := s.staffRepo.GetAll(100, 0)
+	// Scoped to the institution: general subjects are never staffed by a
+	// lecturer from another campus.
+	staff, err := s.staffRepo.GetAll(institutionID, 100, 0)
 	if err != nil {
 		return 0, err
 	}
 	for _, staffMember := range staff {
-		if s.isStaffAvailable(staffMember.ID, day, startTime, endTime, pending, staffHours, staffMember.MaxHours, regenClassID) {
+		if s.isStaffAvailable(institutionID, staffMember.ID, day, startTime, endTime, pending, staffHours, staffMember.MaxHours, regenClassID) {
 			return staffMember.ID, nil
 		}
 	}
@@ -528,6 +563,7 @@ func (s *TimetableService) findAvailableStaffForSubject(
 }
 
 func (s *TimetableService) isStaffAvailable(
+	institutionID uint,
 	staffID uint,
 	day models.Weekday,
 	startTime, endTime string,
@@ -543,7 +579,7 @@ func (s *TimetableService) isStaffAvailable(
 		return false
 	}
 
-	staff, err := s.staffRepo.GetByID(staffID)
+	staff, err := s.staffRepo.GetByID(institutionID, staffID)
 	if err == nil && staff != nil {
 		unavail, _ := parseStaffPrefs(staff.Preferences)
 		dayStr := string(day)
@@ -554,7 +590,7 @@ func (s *TimetableService) isStaffAvailable(
 		}
 	}
 
-	existing, err := s.timetableRepo.GetByStaff(staffID)
+	existing, err := s.timetableRepo.GetByStaff(institutionID, staffID)
 	if err != nil {
 		return false
 	}
@@ -575,6 +611,7 @@ func (s *TimetableService) isStaffAvailable(
 }
 
 func (s *TimetableService) findAvailableRoom(
+	institutionID uint,
 	day models.Weekday,
 	startTime, endTime string,
 	studentCount int,
@@ -585,8 +622,10 @@ func (s *TimetableService) findAvailableRoom(
 	var rooms []models.Room
 	var err error
 
+	// Room lookups are institution-scoped, so generation can only ever book a
+	// room that belongs to the class's own campus.
 	if requiresLab {
-		rooms, err = s.roomRepo.GetLabRooms()
+		rooms, err = s.roomRepo.GetLabRooms(institutionID)
 		if err != nil {
 			return 0, err
 		}
@@ -594,7 +633,7 @@ func (s *TimetableService) findAvailableRoom(
 			return 0, errors.New("no lab rooms available for lab-required session")
 		}
 	} else {
-		rooms, err = s.roomRepo.GetByCapacity(studentCount)
+		rooms, err = s.roomRepo.GetByCapacity(institutionID, studentCount)
 		if err != nil {
 			return 0, err
 		}
@@ -609,7 +648,7 @@ func (s *TimetableService) findAvailableRoom(
 		}
 
 		busy := false
-		conflicts, err := s.timetableRepo.GetByRoom(room.ID)
+		conflicts, err := s.timetableRepo.GetByRoom(institutionID, room.ID)
 		if err != nil {
 			continue
 		}
@@ -660,8 +699,12 @@ func (s *TimetableService) getEndTime(startTime string) string {
 
 // ValidateTimeSlot validates a timetable entry for conflicts.
 // Pass excludeID on updates to ignore the row being updated.
-func (s *TimetableService) ValidateTimeSlot(timetable *models.Timetable, excludeID uint) error {
+//
+// institutionID is the caller's tenant, so a slot occupied at another
+// institution never blocks a booking here (and vice versa).
+func (s *TimetableService) ValidateTimeSlot(institutionID uint, timetable *models.Timetable, excludeID uint) error {
 	conflicts, err := s.timetableRepo.CheckConflicts(
+		institutionID,
 		timetable.ClassID,
 		timetable.StaffID,
 		timetable.RoomID,

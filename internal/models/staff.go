@@ -22,6 +22,11 @@ type Staff struct {
 	Title       string         `json:"title"`
 	StaffType   string         `json:"staff_type"`
 
+	// InstitutionID is the owning tenant. Email is unique per institution
+	// (partial index on (institution_id, email) WHERE deleted_at IS NULL), not
+	// globally, so the same lecturer email may exist at two institutions.
+	InstitutionID uint `gorm:"not null;index" json:"institution_id"`
+
 	// UserID links this Staff record to the login account (User) that owns it.
 	// Nullable: a staff member may exist without a login account.
 	// Unique: at most one Staff record per User (1:1).
@@ -30,10 +35,11 @@ type Staff struct {
 	UserID *uint `gorm:"uniqueIndex" json:"user_id,omitempty"`
 
 	// Relationships
-	User       User        `gorm:"foreignKey:UserID" json:"user,omitempty"`
-	Faculty    Faculty     `gorm:"foreignKey:FacultyID" json:"faculty,omitempty"`
-	Modules    []Module    `gorm:"many2many:staff_modules;" json:"modules,omitempty"`
-	Timetables []Timetable `json:"timetables,omitempty"`
+	User        User        `gorm:"foreignKey:UserID" json:"user,omitempty"`
+	Institution Institution `gorm:"foreignKey:InstitutionID" json:"institution,omitempty"`
+	Faculty     Faculty     `gorm:"foreignKey:FacultyID" json:"faculty,omitempty"`
+	Modules     []Module    `gorm:"many2many:staff_modules;" json:"modules,omitempty"`
+	Timetables  []Timetable `json:"timetables,omitempty"`
 }
 
 // StaffPreferences represents the structure for staff preferences JSON

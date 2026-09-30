@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -35,6 +34,8 @@ type UpdateClassRequest struct {
 }
 
 func (c *ClassController) CreateClass(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req CreateClassRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
@@ -47,29 +48,33 @@ func (c *ClassController) CreateClass(ctx *gin.Context) {
 		Year:             req.Year,
 		AcademicYear:     req.AcademicYear,
 		NumberOfStudents: req.NumberOfStudents,
+		// The institution is stamped from the authenticated session, not the
+		// payload, so a class can never be created into another tenant.
+		InstitutionID: inst,
 	}
 
-	if err := c.classRepo.Create(class); err != nil {
+	if err := c.classRepo.Create(inst, class); err != nil {
 		logger.Error("Failed to create class: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create class"})
 		return
 	}
 
-	created, _ := c.classRepo.GetByID(class.ID)
+	created, _ := c.classRepo.GetByID(inst, class.ID)
 	ctx.JSON(http.StatusCreated, gin.H{"message": "Class created successfully", "class": created})
 }
 
 func (c *ClassController) GetClass(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid class ID"})
 		return
 	}
 
-	class, err := c.classRepo.GetByID(uint(id))
+	class, err := c.classRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Class not found"})
+		respondRepoError(ctx, "Class not found", err)
 		return
 	}
 
@@ -77,13 +82,11 @@ func (c *ClassController) GetClass(ctx *gin.Context) {
 }
 
 func (c *ClassController) GetAllClasses(ctx *gin.Context) {
-	limit, _ := strconv.Atoi(ctx.DefaultQuery("limit", "10"))
-	offset, _ := strconv.Atoi(ctx.DefaultQuery("offset", "0"))
-	if limit <= 0 {
-		limit = 10
-	}
+	inst := tenantID(ctx)
 
-	classes, err := c.classRepo.GetAll(limit, offset)
+	limit, offset := parsePagination(ctx)
+
+	classes, err := c.classRepo.GetAll(inst, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get classes: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get classes"})
@@ -94,8 +97,9 @@ func (c *ClassController) GetAllClasses(ctx *gin.Context) {
 }
 
 func (c *ClassController) UpdateClass(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid class ID"})
 		return
@@ -107,9 +111,11 @@ func (c *ClassController) UpdateClass(ctx *gin.Context) {
 		return
 	}
 
-	class, err := c.classRepo.GetByID(uint(id))
+	// A class owned by another institution resolves to not-found here, so the
+	// update below can never touch it.
+	class, err := c.classRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Class not found"})
+		respondRepoError(ctx, "Class not found", err)
 		return
 	}
 
@@ -129,27 +135,28 @@ func (c *ClassController) UpdateClass(ctx *gin.Context) {
 		class.NumberOfStudents = *req.NumberOfStudents
 	}
 
-	if err := c.classRepo.Update(class); err != nil {
+	if err := c.classRepo.Update(inst, class); err != nil {
 		logger.Error("Failed to update class: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update class"})
 		return
 	}
 
-	updated, _ := c.classRepo.GetByID(class.ID)
+	updated, _ := c.classRepo.GetByID(inst, class.ID)
 	ctx.JSON(http.StatusOK, gin.H{"message": "Class updated successfully", "class": updated})
 }
 
 func (c *ClassController) DeleteClass(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid class ID"})
 		return
 	}
 
-	if err := c.classRepo.Delete(uint(id)); err != nil {
+	if err := c.classRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete class: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete class"})
+		respondRepoError(ctx, "Class not found", err)
 		return
 	}
 

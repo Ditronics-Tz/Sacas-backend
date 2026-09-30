@@ -34,6 +34,10 @@ type CreateUserRequest struct {
 	LastName    string          `json:"last_name" binding:"required,min=2,max=50"`
 	PhoneNumber string          `json:"phone_number,omitempty"`
 	Role        models.UserRole `json:"role" binding:"required"`
+	// InstitutionID is only honoured from a platform super_admin. Any other
+	// caller is pinned to their own institution, so a tenant admin cannot
+	// create a user inside somebody else's campus.
+	InstitutionID *uint `json:"institution_id,omitempty"`
 }
 
 // UpdateUserRequest represents the request payload for updating a user
@@ -52,9 +56,10 @@ type ChangePasswordRequest struct {
 	NewPassword     string `json:"new_password" binding:"required,min=8,strongpassword"`
 }
 
-// GetUsers retrieves a paginated list of users
+// GetUsers retrieves a paginated list of users, scoped to the caller's tenant.
 func (uc *UserController) GetUsers(c *gin.Context) {
-	// Get pagination parameters
+	inst := tenantID(c)
+
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
 	role := c.Query("role")
@@ -72,9 +77,9 @@ func (uc *UserController) GetUsers(c *gin.Context) {
 	var err error
 
 	if role != "" {
-		users, err = uc.userRepo.GetByRole(role, limit, offset)
+		users, err = uc.userRepo.GetByRole(inst, role, limit, offset)
 	} else {
-		users, err = uc.userRepo.GetAll(limit, offset)
+		users, err = uc.userRepo.GetAll(inst, limit, offset)
 	}
 
 	if err != nil {
@@ -91,22 +96,26 @@ func (uc *UserController) GetUsers(c *gin.Context) {
 	})
 }
 
-// GetUser retrieves a single user by ID
+// GetUser retrieves a single user by ID.
+//
+// A user belonging to another institution is reported as 404, so one campus's
+// admin cannot probe for (or confirm) another campus's accounts.
 func (uc *UserController) GetUser(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	inst := tenantID(c)
+
+	id, err := parseIDParam(c, "id")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
 
-	user, err := uc.userRepo.GetByID(uint(id))
+	user, err := uc.userRepo.GetByID(id)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-		} else {
-			logger.Error("Failed to retrieve user %d: %v", id, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user"})
-		}
+		respondRepoError(c, "User not found", err)
+		return
+	}
+	if user.InstitutionID == nil || !repositories.InTenant(*user.InstitutionID, inst) {
+		respondNotFound(c, "User not found")
 		return
 	}
 
@@ -116,6 +125,8 @@ func (uc *UserController) GetUser(c *gin.Context) {
 
 // CreateUser creates a new user (admin only)
 func (uc *UserController) CreateUser(c *gin.Context) {
+	inst := tenantID(c)
+
 	var req CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		if strings.Contains(err.Error(), "Password") || strings.Contains(err.Error(), "password") {
@@ -149,6 +160,20 @@ func (uc *UserController) CreateUser(c *gin.Context) {
 		}
 	}
 
+	// The target institution is the caller's own, unless a platform
+	// super_admin explicitly names another one.
+	targetInstitution := inst
+	isPlatform := currentUserRole == string(models.RoleSuperAdmin) && repositories.IsPlatformScope(inst)
+	if isPlatform {
+		if req.InstitutionID != nil {
+			targetInstitution = *req.InstitutionID
+		} else {
+			// A platform super_admin with no explicit target creates a
+			// platform-level account (institution_id NULL).
+			targetInstitution = repositories.PlatformScope
+		}
+	}
+
 	// Hash password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
@@ -167,6 +192,10 @@ func (uc *UserController) CreateUser(c *gin.Context) {
 		IsActive:    false, // New users start inactive
 		IsVerified:  false,
 	}
+	if !repositories.IsPlatformScope(targetInstitution) {
+		instID := targetInstitution
+		user.InstitutionID = &instID
+	}
 
 	if err := uc.userRepo.Create(user); err != nil {
 		logger.Error("Failed to create user: %v", err)
@@ -183,7 +212,9 @@ func (uc *UserController) CreateUser(c *gin.Context) {
 
 // UpdateUser updates an existing user
 func (uc *UserController) UpdateUser(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	inst := tenantID(c)
+
+	id, err := parseIDParam(c, "id")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
@@ -195,15 +226,14 @@ func (uc *UserController) UpdateUser(c *gin.Context) {
 		return
 	}
 
-	// Get existing user
-	user, err := uc.userRepo.GetByID(uint(id))
+	// Get existing user, rejecting accounts outside the caller's institution.
+	user, err := uc.userRepo.GetByID(id)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-		} else {
-			logger.Error("Failed to retrieve user %d: %v", id, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user"})
-		}
+		respondRepoError(c, "User not found", err)
+		return
+	}
+	if user.InstitutionID == nil || !repositories.InTenant(*user.InstitutionID, inst) {
+		respondNotFound(c, "User not found")
 		return
 	}
 
@@ -245,9 +275,9 @@ func (uc *UserController) UpdateUser(c *gin.Context) {
 		user.IsActive = *req.IsActive
 	}
 
-	if err := uc.userRepo.Update(user); err != nil {
+	if err := uc.userRepo.Update(inst, user); err != nil {
 		logger.Error("Failed to update user %d: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update user"})
+		respondRepoError(c, "User not found", err)
 		return
 	}
 
@@ -260,21 +290,22 @@ func (uc *UserController) UpdateUser(c *gin.Context) {
 
 // DeleteUser deletes a user
 func (uc *UserController) DeleteUser(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
+	inst := tenantID(c)
+
+	id, err := parseIDParam(c, "id")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 		return
 	}
 
-	// Check if user exists and get their role
-	user, err := uc.userRepo.GetByID(uint(id))
+	// Check the user exists and is in the caller's institution.
+	user, err := uc.userRepo.GetByID(id)
 	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-		} else {
-			logger.Error("Failed to retrieve user %d: %v", id, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve user"})
-		}
+		respondRepoError(c, "User not found", err)
+		return
+	}
+	if user.InstitutionID == nil || !repositories.InTenant(*user.InstitutionID, inst) {
+		respondNotFound(c, "User not found")
 		return
 	}
 
@@ -292,15 +323,14 @@ func (uc *UserController) DeleteUser(c *gin.Context) {
 	}
 
 	// Prevent self-deletion
-	currentUserID := c.GetFloat64("user_id")
-	if uint(currentUserID) == uint(id) {
+	if currentID, ok := currentUserID(c); ok && currentID == id {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot delete your own account"})
 		return
 	}
 
-	if err := uc.userRepo.Delete(uint(id)); err != nil {
+	if err := uc.userRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete user %d: %v", id, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete user"})
+		respondRepoError(c, "User not found", err)
 		return
 	}
 
@@ -308,9 +338,14 @@ func (uc *UserController) DeleteUser(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "User deleted successfully"})
 }
 
-// ChangePassword allows a user to change their password
+// ChangePassword allows a user to change their password. The acting user comes
+// from the resolved session, not from the request.
 func (uc *UserController) ChangePassword(c *gin.Context) {
-	userID := uint(c.GetFloat64("user_id"))
+	userID, ok := currentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
 
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -360,7 +395,13 @@ func (uc *UserController) ChangePassword(c *gin.Context) {
 
 // GetProfile returns the current user's profile
 func (uc *UserController) GetProfile(c *gin.Context) {
-	userID := uint(c.GetFloat64("user_id"))
+	inst := tenantID(c)
+
+	userID, ok := currentUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+		return
+	}
 
 	user, err := uc.userRepo.GetByID(userID)
 	if err != nil {
@@ -369,10 +410,13 @@ func (uc *UserController) GetProfile(c *gin.Context) {
 		return
 	}
 
-	// Update last login time
+	// Update last login time. A failure here must not fail the profile read,
+	// so the error is logged and ignored.
 	now := time.Now()
 	user.LastLoginAt = &now
-	uc.userRepo.Update(user)
+	if err := uc.userRepo.Update(inst, user); err != nil && err != gorm.ErrRecordNotFound {
+		logger.Warn("Failed to update last login for user %d: %v", userID, err)
+	}
 
 	logger.Info("Profile retrieved for user %d", userID)
 	c.JSON(http.StatusOK, gin.H{"user": user})

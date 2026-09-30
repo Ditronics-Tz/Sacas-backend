@@ -20,6 +20,119 @@ Timetable domain routes also need role **`administrator`** or **`super_admin`**.
 
 ---
 
+## Multi-tenancy
+
+Every timetable-domain record belongs to exactly one institution. The tenant is
+resolved **server-side on every request** from the authenticated user's own
+database row — the client never sends an `institution_id` on normal routes, and
+one is ignored if it does.
+
+What this means for the frontend:
+
+- **Log in, then use the API normally.** There is no institution switcher and no
+  tenant header. The signed-in user's account already determines what is
+  visible.
+- **A record from another institution returns `404`, not `403`.** This is
+  deliberate: a `403` would confirm that another institution's record exists.
+  So "not found" and "belongs to someone else" are the same response, and the
+  UI should just render an empty/not-found state.
+- **Institution state gates access.** A `pending`, `suspended`, or
+  trial-expired institution cannot sign anyone in; every protected route
+  answers `403` with a `message` explaining why.
+- **A role change or deactivation takes effect immediately**, not at token
+  expiry — the role is re-read from the database on each request, so there is no
+  need to force a re-login after an admin changes a user's role.
+- **`super_admin` with no institution is a platform operator** and sees all
+  institutions. A `super_admin` assigned to an institution is scoped to it like
+  any other tenant.
+
+Every response body for a domain record now includes `institution_id`, so the
+UI can label or filter without a second call.
+
+### GET `/api/protected/institution/me`
+
+Any authenticated user. Returns the caller's own institution.
+
+```json
+{
+  "institution": {
+    "id": 2,
+    "name": "Dar es Salaam University",
+    "slug": "dar-es-salaam-university",
+    "type": "university",
+    "region": "Dar es Salaam",
+    "country": "Tanzania",
+    "email": "registry@dstu.ac.tz",
+    "phone": "+255212345678",
+    "address": "…",
+    "logo_url": "…",
+    "status": "active",
+    "plan": "pro",
+    "trial_ends_at": null,
+    "created_at": "2026-09-30T09:00:00Z",
+    "updated_at": "2026-09-30T09:00:00Z"
+  },
+  "scope": "institution"
+}
+```
+
+`type` is one of `college`, `university`, `school`, `institute`.
+`status` is one of `pending`, `active`, `suspended`.
+`plan` is one of `free`, `pro`, `enterprise`.
+
+A platform operator (`super_admin` with no institution) gets:
+
+```json
+{ "institution": null, "scope": "platform", "message": "This account is a platform administrator and is not bound to a single institution" }
+```
+
+### Institutions management (platform super_admin only)
+
+Gated on `super_admin` **and** on having no institution of their own. A tenant's
+own admin cannot reach these.
+
+| Method | Path |
+| --- | --- |
+| `POST` | `/api/protected/superadmin/institutions` |
+| `GET` | `/api/protected/superadmin/institutions` |
+| `GET` | `/api/protected/superadmin/institutions/:id` |
+| `PUT` | `/api/protected/superadmin/institutions/:id` |
+| `DELETE` | `/api/protected/superadmin/institutions/:id` |
+
+`POST` body: `name` and `type` are required. `slug` is optional and derived from
+`name` when omitted. `status` defaults to **`pending`** — a new institution
+cannot sign anyone in until it is explicitly activated. `plan` defaults to
+`free` and `country` to `Tanzania`.
+
+```json
+{ "name": "Dar es Salaam University", "type": "university", "region": "Dar es Salaam", "email": "registry@dstu.ac.tz" }
+```
+
+`GET` supports `?status=pending|active|suspended`, plus `limit`/`offset`.
+`GET /:id` also returns a `user_count`.
+
+`DELETE` on the default institution (id `1`) is refused with `400` — it is the
+backfill target for existing data, so it must be suspended rather than removed.
+
+### Generation settings are layered
+
+`GET`/`PUT /api/protected/superadmin/generation-settings` now operate on a
+target institution:
+
+- A platform super_admin with no `institution_id` reads/writes the **platform
+  default**.
+- Pass `?institution_id=N` (GET) or `"institution_id": N` (PUT) to read/write a
+  specific tenant's **override**.
+- An institution admin (not platform) is pinned to their own institution: a
+  `institution_id` naming another tenant is rejected with `403`.
+
+An institution with no override inherits the platform values, so the response
+always shows the **effective** settings. `PUT` with `{"inherit_platform": true}`
+drops the override and returns to inheritance. Responses carry `institution_id`
+and `is_platform_row`.
+
+---
+
 ## System
 
 ### GET `/api/health`
@@ -147,11 +260,21 @@ Clears cookie. Response: `{ "message": "Logged out successfully" }`.
 |--------|------|-------|-------------|
 | GET | `/api/protected/profile` | any auth | Current user |
 | PUT | `/api/protected/change-password` | any auth | Change password |
-| GET | `/api/protected/users` | admin+ | List users |
-| GET | `/api/protected/users/:id` | admin+ | Get user |
+| GET | `/api/protected/institution/me` | any auth | Caller's own institution |
+| GET | `/api/protected/users` | admin+ | List users (own institution) |
+| GET | `/api/protected/users/:id` | admin+ | Get user (own institution) |
 | POST | `/api/protected/users` | admin+ | Create user |
-| PUT | `/api/protected/users/:id` | admin+ | Update user |
-| DELETE | `/api/protected/users/:id` | admin+ | Soft-delete user |
+| PUT | `/api/protected/users/:id` | admin+ | Update user (own institution) |
+| DELETE | `/api/protected/users/:id` | admin+ | Soft-delete user (own institution) |
+
+User listings, reads, updates, and deletes are scoped to the caller's
+institution. Platform `super_admin` accounts (`institution_id` null) are **not**
+included in a tenant's listing, and a tenant admin cannot reach them.
+
+`POST /users` creates the user in the caller's own institution. An
+`institution_id` in the body is honoured only when a **platform** super_admin
+sends it; for anyone else it is ignored and the user lands in the caller's
+institution.
 
 ---
 
@@ -159,26 +282,36 @@ Clears cookie. Response: `{ "message": "Logged out successfully" }`.
 
 | Method | Path | Roles |
 |--------|------|-------|
-| GET | `/api/protected/admin/dashboard` | admin+ — includes real entity `counts` |
+| GET | `/api/protected/admin/dashboard` | admin+ — real entity `counts` |
 | GET | `/api/protected/admin/users/stats` | admin+ |
-| GET | `/api/protected/superadmin/dashboard` | super_admin |
+| GET | `/api/protected/superadmin/dashboard` | super_admin — adds `institutions` counts |
 | GET | `/api/protected/superadmin/system/info` | super_admin |
 
-Admin dashboard `counts`: `faculties`, `courses`, `modules`, `classes`, `rooms`, `staff`, `timetables`.
+Admin dashboard `counts`: `faculties`, `courses`, `modules`, `classes`, `rooms`,
+`staff`, `timetables`. These are **scoped to the caller's institution**; a
+platform super_admin sees platform-wide totals. The body includes
+`institution_id` for a tenant, or `"scope": "platform"` for a platform operator,
+so the UI can label the numbers.
+
+Superadmin dashboard adds `institutions: { total, active, pending, suspended }`.
 
 ---
 
 ## Generation settings (JWT + super_admin)
 
-System-wide singleton for timetable generation engine options (solver-tunable
-knobs). One settings row affects **every** future generation run — hence the
-`superadmin` gating. If never configured, `GET` returns populated defaults
-(`time_budget_sec: 30`, empty `soft_weights`) rather than erroring.
+Settings are **layered**: a platform-wide default row plus an optional
+per-institution override. The API always returns the *effective* settings for the
+target, so the UI never has to merge two responses itself. If nothing is
+configured anywhere, `GET` returns populated defaults (`time_budget_sec: 30`,
+empty `soft_weights`) rather than erroring.
+
+See [Multi-tenancy](#multi-tenancy) above for how the target institution is
+chosen and how to clear an override.
 
 | Method | Path | Body |
 |--------|------|------|
-| GET | `/api/protected/superadmin/generation-settings` | — → `{ "settings": { "id", "time_budget_sec", "soft_weights", "created_at", "updated_at" } }` |
-| PUT | `/api/protected/superadmin/generation-settings` | partial: `{ "time_budget_sec"?, "soft_weights"? }` |
+| GET | `/api/protected/superadmin/generation-settings` | — (optional `?institution_id=N`) → `{ "settings": { "id", "institution_id", "time_budget_sec", "soft_weights", "created_at", "updated_at" }, "institution_id", "is_platform_row" }` |
+| PUT | `/api/protected/superadmin/generation-settings` | partial: `{ "time_budget_sec"?, "soft_weights"?, "institution_id"?, "inherit_platform"? }` |
 
 Validation (server-side, rejects with `400`):
 
@@ -217,7 +350,32 @@ path) are ignored, so a `role=user` account can never read another staff
 member's timetable. Returns `404` if no Staff profile is linked to the
 account. Admins can still read any staff timetable via `/by-staff/:staff_id`.
 
-List endpoints accept: `?limit=10&offset=0`.
+List endpoints accept: `?limit=10&offset=0`. `limit` is capped server-side, so an
+oversized value is clamped rather than honoured.
+
+### Per-institution uniqueness
+
+Names and codes are unique **within an institution**, not globally, and only
+among non-deleted rows (soft-deleting frees the name for reuse). Matching is
+case-insensitive.
+
+| Entity | Unique per institution |
+| --- | --- |
+| Faculty | `name` |
+| Course | `name` |
+| Class | `name` |
+| Module | `name`, and `code` (when non-empty) |
+| Room | `name` |
+| Subject | `name` |
+| Staff | `email` |
+| Institution | `slug` (platform-wide, not per-institution) |
+
+`User.email` is the exception: it stays **globally unique**, because it is the
+login identifier.
+
+A collision surfaces as a `500` from the unique index rather than a friendly
+`409` on every path — the staff create/update endpoints are the exception and do
+return `409` for a duplicate email.
 
 ### Faculties (UI: Departments)
 
@@ -252,6 +410,10 @@ List endpoints accept: `?limit=10&offset=0`.
 
 **`type`:** `core` \| `elective` \| `general_subject`  
 `course_id` null for general subjects.
+
+A `course_id` must belong to the caller's institution, on both create and
+update; a cross-institution `course_id` is rejected with `400`. A `code` is
+unique per institution (case-insensitively, among non-deleted rows).
 
 ### Classes
 
@@ -299,11 +461,19 @@ List endpoints accept: `?limit=10&offset=0`.
 | POST | `/staff` | `{ "name", "email", "faculty_id", "max_hours?", "preferences?", "rfid_id?", "phone_number?", "title?", "staff_type?", "user_id?" }` — `user_id` optionally links to an existing `User` (admin must supply explicit user ID; never auto-matched by email) |
 | GET | `/staff` | |
 | GET | `/staff/:id` | |
-| PUT | `/staff/:id` | partial (including `user_id` to (re)link) |
+| PUT | `/staff/:id` | partial. `user_id` (re)links the staff record; `clear_user_id: true` unlinks it. The link is written through a dedicated path, so an ordinary profile update can never re-point it |
 | DELETE | `/staff/:id` | |
 | POST | `/staff/:id/modules/:module_id` | assign |
 | DELETE | `/staff/:id/modules/:module_id` | unassign |
 | GET | `/staff/:id/modules` | list modules for staff |
+
+A staff `email` is unique **per institution**, not globally — the same address
+may exist at two institutions. Creating one that already exists in the caller's
+institution returns `409`.
+
+Linking a staff record to a `user_id` requires that user to belong to the same
+institution; a cross-institution `user_id` is rejected with `400`. A user can be
+linked to at most one staff record.
 
 ### Subjects
 
@@ -347,6 +517,16 @@ Infeasible: HTTP `422` with `unsat_reasons`. Conflicts on manual create: `409`.
 
 **Manual create:** exactly one of `module_id` XOR `subject_id`.
 
+**Generation is tenant-scoped.** The `class_id` must belong to the caller's
+institution; otherwise `404` (not a generation error). The engine reads only
+that institution's modules, staff, rooms, and general subjects, so a generated
+timetable can never reference another campus's rooms or lecturers, and a room
+that is busy at another institution does not block a slot here.
+
+Referenced records on manual create/update must also be in the caller's
+institution — `class_id`, `staff_id`, and `room_id` each return `404` when they
+belong to another institution.
+
 ---
 
 ## Error shape
@@ -359,6 +539,12 @@ or
 
 ```json
 { "error": "Invalid request payload", "details": "..." }
+```
+
+A blocked institution adds context so the UI can explain itself:
+
+```json
+{ "error": "Institution is not active", "status": "suspended", "message": "This institution's account is suspended. Contact the platform administrator." }
 ```
 
 ---

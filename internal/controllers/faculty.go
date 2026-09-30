@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -37,6 +36,8 @@ type UpdateFacultyRequest struct {
 }
 
 func (c *FacultyController) CreateFaculty(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req CreateFacultyRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
@@ -49,9 +50,11 @@ func (c *FacultyController) CreateFaculty(ctx *gin.Context) {
 		HodName:     req.HodName,
 		HodPhone:    req.HodPhone,
 		HodEmail:    req.HodEmail,
+		// Stamped from the session, never from the payload.
+		InstitutionID: inst,
 	}
 
-	if err := c.facultyRepo.Create(faculty); err != nil {
+	if err := c.facultyRepo.Create(inst, faculty); err != nil {
 		logger.Error("Failed to create faculty: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create faculty"})
 		return
@@ -61,16 +64,17 @@ func (c *FacultyController) CreateFaculty(ctx *gin.Context) {
 }
 
 func (c *FacultyController) GetFaculty(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid faculty ID"})
 		return
 	}
 
-	faculty, err := c.facultyRepo.GetByID(uint(id))
+	faculty, err := c.facultyRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Faculty not found"})
+		respondRepoError(ctx, "Faculty not found", err)
 		return
 	}
 
@@ -78,16 +82,11 @@ func (c *FacultyController) GetFaculty(ctx *gin.Context) {
 }
 
 func (c *FacultyController) GetAllFaculties(ctx *gin.Context) {
-	limit, _ := strconv.Atoi(ctx.DefaultQuery("limit", "10"))
-	offset, _ := strconv.Atoi(ctx.DefaultQuery("offset", "0"))
-	if limit <= 0 {
-		limit = 10
-	}
-	if offset < 0 {
-		offset = 0
-	}
+	inst := tenantID(ctx)
 
-	faculties, err := c.facultyRepo.GetAll(limit, offset)
+	limit, offset := parsePagination(ctx)
+
+	faculties, err := c.facultyRepo.GetAll(inst, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get faculties: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get faculties"})
@@ -98,8 +97,9 @@ func (c *FacultyController) GetAllFaculties(ctx *gin.Context) {
 }
 
 func (c *FacultyController) UpdateFaculty(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid faculty ID"})
 		return
@@ -111,9 +111,9 @@ func (c *FacultyController) UpdateFaculty(ctx *gin.Context) {
 		return
 	}
 
-	faculty, err := c.facultyRepo.GetByID(uint(id))
+	faculty, err := c.facultyRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Faculty not found"})
+		respondRepoError(ctx, "Faculty not found", err)
 		return
 	}
 
@@ -133,7 +133,7 @@ func (c *FacultyController) UpdateFaculty(ctx *gin.Context) {
 		faculty.HodEmail = *req.HodEmail
 	}
 
-	if err := c.facultyRepo.Update(faculty); err != nil {
+	if err := c.facultyRepo.Update(inst, faculty); err != nil {
 		logger.Error("Failed to update faculty: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update faculty"})
 		return
@@ -143,16 +143,17 @@ func (c *FacultyController) UpdateFaculty(ctx *gin.Context) {
 }
 
 func (c *FacultyController) DeleteFaculty(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid faculty ID"})
 		return
 	}
 
-	if err := c.facultyRepo.Delete(uint(id)); err != nil {
+	if err := c.facultyRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete faculty: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete faculty"})
+		respondRepoError(ctx, "Faculty not found", err)
 		return
 	}
 

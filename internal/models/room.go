@@ -14,12 +14,17 @@ type Room struct {
 	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
 	Name           string         `gorm:"not null" json:"name" validate:"required,min=1,max=100"`
 	Capacity       int            `gorm:"not null" json:"capacity" validate:"required,min=1"`
-	Features       datatypes.JSON `json:"features"`         // JSON field for room features
+	Features       datatypes.JSON `json:"features"`                    // JSON field for room features
 	Sticky         bool           `gorm:"default:false" json:"sticky"` // If room is bound to specific modules
-	AllowedCourses datatypes.JSON `json:"allowed_courses"` // JSON field for course restrictions
+	AllowedCourses datatypes.JSON `json:"allowed_courses"`             // JSON field for course restrictions
+
+	// InstitutionID is the owning tenant. Room names are unique per
+	// institution, not globally.
+	InstitutionID uint `gorm:"not null;index" json:"institution_id"`
 
 	// Relationships
-	Timetables []Timetable `json:"timetables,omitempty"`
+	Institution Institution `gorm:"foreignKey:InstitutionID" json:"institution,omitempty"`
+	Timetables  []Timetable `gorm:"foreignKey:RoomID" json:"timetables,omitempty"`
 }
 
 // RoomFeatures represents the structure for room features JSON

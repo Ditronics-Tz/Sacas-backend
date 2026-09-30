@@ -153,54 +153,7 @@ func SuperAdminMiddleware() gin.HandlerFunc {
 	return RequireRole(string(models.RoleSuperAdmin))
 }
 
-// ActiveUserLookup looks up a user by ID for active checks.
+// ActiveUserLookup looks up a user by ID. It is the dependency TenantMiddleware
+// needs to resolve the caller's identity, role, and institution from the
+// database on every request.
 type ActiveUserLookup func(id uint) (*models.User, error)
-
-// ActiveUserMiddleware rejects deactivated users even if JWT is still valid.
-func ActiveUserMiddleware(lookup ActiveUserLookup) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if lookup == nil {
-			c.Next()
-			return
-		}
-		raw, exists := c.Get("user_id")
-		if !exists {
-			c.Next()
-			return
-		}
-		var id uint
-		switch v := raw.(type) {
-		case float64:
-			id = uint(v)
-		case int:
-			id = uint(v)
-		case uint:
-			id = v
-		case int64:
-			id = uint(v)
-		default:
-			// try parse via fmt
-			var n uint64
-			_, err := fmt.Sscanf(fmt.Sprint(v), "%d", &n)
-			if err != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user in token"})
-				c.Abort()
-				return
-			}
-			id = uint(n)
-		}
-
-		user, err := lookup(id)
-		if err != nil || user == nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not found"})
-			c.Abort()
-			return
-		}
-		if !user.IsActive {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Account is not active"})
-			c.Abort()
-			return
-		}
-		c.Next()
-	}
-}

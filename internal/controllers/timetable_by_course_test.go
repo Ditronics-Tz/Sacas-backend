@@ -10,83 +10,51 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"gorm.io/gorm"
 
 	"go_boilerplate/internal/middlewares"
 	"go_boilerplate/internal/models"
 )
 
-// stubTimetableRepoByCourse is a focused stub for GetByCourse tests.
-// It reuses the same interface surface as stubTimetableRepo but allows
-// per-test control over GetByCourse behavior.
-type stubTimetableRepoByCourse struct {
-	byCourse map[uint][]models.Timetable
-	err      error
+// nilSliceTimetableRepo returns a nil slice from GetByCourse so the
+// controller's nil guard is exercised. It embeds the shared tenant-aware stub
+// and only overrides the one method under test.
+type nilSliceTimetableRepo struct {
+	*stubTimetableRepo
 }
 
-func (r *stubTimetableRepoByCourse) Create(t *models.Timetable) error { return nil }
-func (r *stubTimetableRepoByCourse) GetByID(id uint) (*models.Timetable, error) {
-	return nil, errNotFound
-}
-func (r *stubTimetableRepoByCourse) Update(t *models.Timetable) error { return nil }
-func (r *stubTimetableRepoByCourse) Delete(id uint) error             { return nil }
-func (r *stubTimetableRepoByCourse) DeleteByClass(classID uint) error { return nil }
-func (r *stubTimetableRepoByCourse) ReplaceClassTimetable(classID uint, entries []models.Timetable) ([]models.Timetable, error) {
+func (r *nilSliceTimetableRepo) GetByCourse(institutionID, courseID uint) ([]models.Timetable, error) {
 	return nil, nil
 }
-func (r *stubTimetableRepoByCourse) GetAll(limit, offset int) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepoByCourse) GetByClass(classID uint) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepoByCourse) GetByStaff(staffID uint) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepoByCourse) GetByCourse(courseID uint) ([]models.Timetable, error) {
-	if r.err != nil {
-		return nil, r.err
-	}
-	if r.byCourse != nil {
-		if v, ok := r.byCourse[courseID]; ok {
-			return v, nil
-		}
-	}
-	return []models.Timetable{}, nil
-}
-func (r *stubTimetableRepoByCourse) GetByRoom(roomID uint) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepoByCourse) GetByDay(day models.Weekday) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepoByCourse) CheckConflicts(classID, staffID, roomID uint, day models.Weekday, startTime, endTime string, excludeID uint) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepoByCourse) GetByDateRange(startDate, endDate string) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (r *stubTimetableRepoByCourse) DB() *gorm.DB { return nil }
 
-func newByCourseRouter(repo *stubTimetableRepoByCourse) *gin.Engine {
+// byCourseRouter wires GetTimetableByCourse the way the protected timetable
+// group does: an institution admin scoped to tenantA.
+func byCourseRouter(repo *stubTimetableRepo) *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	ctrl := NewTimetableController(repo, nil, nil)
+	ctrl := NewTimetableController(repo, newStubStaffRepo(), newStubClassRepo(), newStubRoomRepo(), nil)
 	r := gin.New()
-	r.GET("/api/protected/timetable/by-course/:course_id", ctrl.GetTimetableByCourse)
+	r.GET("/api/protected/timetable/by-course/:course_id", withTenant(ctrl.GetTimetableByCourse, tenantA))
 	return r
+}
+
+// byCourseRepo builds a repo with two entries for course 5, all in tenantA.
+func byCourseRepo() *stubTimetableRepo {
+	repo := newStubTimetableRepo()
+	repo.classCourse[10] = 5
+	repo.classCourse[11] = 5
+	repo.seed(&models.Timetable{
+		ClassID: 10, StaffID: 1, RoomID: 1, InstitutionID: tenantA,
+		Day: models.Monday, StartTime: "08:00", EndTime: "09:00",
+	})
+	repo.seed(&models.Timetable{
+		ClassID: 11, StaffID: 2, RoomID: 2, InstitutionID: tenantA,
+		Day: models.Tuesday, StartTime: "09:00", EndTime: "10:00",
+	})
+	return repo
 }
 
 // 1. Success path — course with classes that have timetable entries.
 func TestGetTimetableByCourse_Success(t *testing.T) {
-	repo := &stubTimetableRepoByCourse{
-		byCourse: map[uint][]models.Timetable{
-			5: {
-				{ID: 1, ClassID: 10, StaffID: 1, RoomID: 1, Day: models.Monday, StartTime: "08:00", EndTime: "09:00"},
-				{ID: 2, ClassID: 11, StaffID: 2, RoomID: 2, Day: models.Tuesday, StartTime: "09:00", EndTime: "10:00"},
-			},
-		},
-	}
-	r := newByCourseRouter(repo)
+	r := byCourseRouter(byCourseRepo())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/protected/timetable/by-course/5", nil)
 	w := httptest.NewRecorder()
@@ -108,12 +76,7 @@ func TestGetTimetableByCourse_Success(t *testing.T) {
 
 // 2. Course with no classes — empty array, not null.
 func TestGetTimetableByCourse_Empty(t *testing.T) {
-	repo := &stubTimetableRepoByCourse{
-		byCourse: map[uint][]models.Timetable{
-			99: {}, // explicit empty
-		},
-	}
-	r := newByCourseRouter(repo)
+	r := byCourseRouter(byCourseRepo())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/protected/timetable/by-course/99", nil)
 	w := httptest.NewRecorder()
@@ -142,9 +105,12 @@ func TestGetTimetableByCourse_Empty(t *testing.T) {
 
 // Also verify the nil-slice guard: repo returns nil (simulating uninitialized map miss).
 func TestGetTimetableByCourse_NilSliceGuard(t *testing.T) {
-	// Override to return nil explicitly
-	nilRepo := &nilSliceRepo{}
-	r := newByCourseRouterRaw(nilRepo)
+	ctrl := NewTimetableController(
+		&nilSliceTimetableRepo{stubTimetableRepo: newStubTimetableRepo()},
+		newStubStaffRepo(), newStubClassRepo(), newStubRoomRepo(), nil,
+	)
+	r := gin.New()
+	r.GET("/api/protected/timetable/by-course/:course_id", withTenant(ctrl.GetTimetableByCourse, tenantA))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/protected/timetable/by-course/7", nil)
 	w := httptest.NewRecorder()
@@ -158,56 +124,9 @@ func TestGetTimetableByCourse_NilSliceGuard(t *testing.T) {
 	}
 }
 
-// nilSliceRepo returns nil slice to exercise the controller's nil guard.
-type nilSliceRepo struct{ stubTimetableRepoByCourse }
-
-func (r *nilSliceRepo) GetByCourse(courseID uint) ([]models.Timetable, error) { return nil, nil }
-
-func newByCourseRouterRaw(repo *nilSliceRepo) *gin.Engine {
-	gin.SetMode(gin.TestMode)
-	// adapt nilSliceRepo to the interface by wrapping
-	ctrl := NewTimetableController(&nilSliceAdapter{inner: repo}, nil, nil)
-	r := gin.New()
-	r.GET("/api/protected/timetable/by-course/:course_id", ctrl.GetTimetableByCourse)
-	return r
-}
-
-type nilSliceAdapter struct{ inner *nilSliceRepo }
-
-func (a *nilSliceAdapter) Create(t *models.Timetable) error { return nil }
-func (a *nilSliceAdapter) GetByID(id uint) (*models.Timetable, error) {
-	return nil, errNotFound
-}
-func (a *nilSliceAdapter) Update(t *models.Timetable) error { return nil }
-func (a *nilSliceAdapter) Delete(id uint) error             { return nil }
-func (a *nilSliceAdapter) DeleteByClass(classID uint) error { return nil }
-func (a *nilSliceAdapter) ReplaceClassTimetable(classID uint, entries []models.Timetable) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (a *nilSliceAdapter) GetAll(limit, offset int) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (a *nilSliceAdapter) GetByClass(classID uint) ([]models.Timetable, error) { return nil, nil }
-func (a *nilSliceAdapter) GetByStaff(staffID uint) ([]models.Timetable, error) { return nil, nil }
-func (a *nilSliceAdapter) GetByCourse(courseID uint) ([]models.Timetable, error) {
-	return a.inner.GetByCourse(courseID)
-}
-func (a *nilSliceAdapter) GetByRoom(roomID uint) ([]models.Timetable, error) { return nil, nil }
-func (a *nilSliceAdapter) GetByDay(day models.Weekday) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (a *nilSliceAdapter) CheckConflicts(classID, staffID, roomID uint, day models.Weekday, startTime, endTime string, excludeID uint) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (a *nilSliceAdapter) GetByDateRange(startDate, endDate string) ([]models.Timetable, error) {
-	return nil, nil
-}
-func (a *nilSliceAdapter) DB() *gorm.DB { return nil }
-
 // 3a. Invalid: non-numeric :course_id -> 400
 func TestGetTimetableByCourse_InvalidID(t *testing.T) {
-	repo := &stubTimetableRepoByCourse{}
-	r := newByCourseRouter(repo)
+	r := byCourseRouter(byCourseRepo())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/protected/timetable/by-course/abc", nil)
 	w := httptest.NewRecorder()
@@ -218,18 +137,48 @@ func TestGetTimetableByCourse_InvalidID(t *testing.T) {
 	}
 }
 
+// TestGetTimetableByCourse_CrossTenantIsolation is the isolation test for this
+// controller: a session scoped to institution A must not see the entries that
+// belong to institution B, even for the same numeric course ID.
+func TestGetTimetableByCourse_CrossTenantIsolation(t *testing.T) {
+	repo := byCourseRepo()
+	// Institution B has its own class 20 on the same course ID 5.
+	repo.classCourse[20] = 5
+	repo.seed(&models.Timetable{
+		ClassID: 20, StaffID: 9, RoomID: 9, InstitutionID: tenantB,
+		Day: models.Wednesday, StartTime: "11:00", EndTime: "12:00",
+	})
+
+	r := byCourseRouter(repo)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/protected/timetable/by-course/5", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `"class_id":20`) {
+		t.Fatalf("response leaked another tenant's timetable entries: %s", w.Body.String())
+	}
+
+	var body struct {
+		Timetables []models.Timetable `json:"timetables"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if len(body.Timetables) != 2 {
+		t.Fatalf("expected only tenant A's 2 entries, got %d", len(body.Timetables))
+	}
+}
+
 // 3b. Unauthorized — no token -> 401, role=user -> 403 (via AdminMiddleware)
 func TestGetTimetableByCourse_Unauthorized(t *testing.T) {
 	secret := "test-jwt-secret-for-by-course-rbac-32"
 	t.Setenv("JWT_SECRET", secret)
 	t.Setenv("ENV", "development")
 
-	repo := &stubTimetableRepoByCourse{
-		byCourse: map[uint][]models.Timetable{
-			5: {{ID: 1, ClassID: 10, StaffID: 1, RoomID: 1, Day: models.Monday, StartTime: "08:00", EndTime: "09:00"}},
-		},
-	}
-	ctrl := NewTimetableController(repo, nil, nil)
+	ctrl := NewTimetableController(byCourseRepo(), newStubStaffRepo(), newStubClassRepo(), newStubRoomRepo(), nil)
 
 	// Helper to build a router that mirrors the real protected+timetable grouping
 	buildRouter := func() *gin.Engine {

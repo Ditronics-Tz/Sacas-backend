@@ -16,6 +16,11 @@ func main() {
 	_ = os.Setenv("SEED_DEMO", "true")
 	db := database.InitDB()
 	defer database.CloseDB(db)
+	// Run the schema migrations first so the institution table and the
+	// institution_id columns exist before anything is seeded.
+	if err := database.RunMigrations(db); err != nil {
+		log.Fatal(err)
+	}
 	// Also bootstrap superadmin if configured
 	if err := database.BootstrapSuperAdmin(db); err != nil {
 		log.Printf("superadmin bootstrap: %v", err)
@@ -25,8 +30,12 @@ func main() {
 	}
 	var users []models.User
 	db.Order("id").Find(&users)
-	fmt.Println("email|role|active")
+	fmt.Println("email|role|institution_id|active")
 	for _, u := range users {
-		fmt.Printf("%s|%s|%v\n", u.Email, u.Role, u.IsActive)
+		var inst any = "platform"
+		if u.InstitutionID != nil {
+			inst = *u.InstitutionID
+		}
+		fmt.Printf("%s|%s|%v|%v\n", u.Email, u.Role, inst, u.IsActive)
 	}
 }

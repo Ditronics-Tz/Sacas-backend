@@ -33,6 +33,7 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	subjectRepo := repositories.NewSubjectRepository(db)
 	timetableRepo := repositories.NewTimetableRepository(db)
 	generationSettingsRepo := repositories.NewGenerationSettingsRepository(db)
+	institutionRepo := repositories.NewInstitutionRepository(db)
 
 	notificationService, err := services.NewNotificationService()
 	if err != nil {
@@ -51,12 +52,13 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 	facultyController := controllers.NewFacultyController(facultyRepo)
 	staffController := controllers.NewStaffControllerWithUser(staffRepo, moduleRepo, userRepo)
 	courseController := controllers.NewCourseController(courseRepo)
-	moduleController := controllers.NewModuleController(moduleRepo)
+	moduleController := controllers.NewModuleController(moduleRepo, courseRepo)
 	classController := controllers.NewClassController(classRepo)
 	roomController := controllers.NewRoomController(roomRepo)
 	subjectController := controllers.NewSubjectController(subjectRepo)
-	timetableController := controllers.NewTimetableController(timetableRepo, staffRepo, timetableService)
+	timetableController := controllers.NewTimetableController(timetableRepo, staffRepo, classRepo, roomRepo, timetableService)
 	generationSettingsController := controllers.NewGenerationSettingsController(generationSettingsRepo)
+	institutionController := controllers.NewInstitutionController(institutionRepo)
 
 	// Security middleware
 	securityConfig := middlewares.DefaultSecurityConfig()
@@ -166,21 +168,41 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 		}
 
 		// Protected endpoints
+		//
+		// Middleware order matters:
+		//   JWTAuthMiddleware  — verify the token signature, set the claims
+		//   TenantMiddleware   — load the user row and OVERWRITE user_id, role,
+		//                        and email from the database, then resolve and
+		//                        pin institution_id
+		//
+		// After this chain the identity and the tenant in the context are
+		// authoritative. A role change, a deactivation, or a suspension takes
+		// effect on the very next request rather than at token expiry, and no
+		// handler can be tricked into another tenant via body, header, or a
+		// stale token. TenantMiddleware also enforces the IsActive check that
+		// the old ActiveUserMiddleware did, so it replaces that middleware
+		// rather than being stacked with it.
 		protected := api.Group("/protected")
 		protected.Use(middlewares.JWTAuthMiddleware())
-		protected.Use(middlewares.ActiveUserMiddleware(userRepo.GetByID))
+		protected.Use(middlewares.TenantMiddleware(userRepo.GetByID, institutionRepo.GetByID))
 		{
 			protected.GET("/profile", userController.GetProfile)
 			protected.PUT("/change-password", userController.ChangePassword)
 
-			// Authenticated staff member's own Staff profile. Resolved from JWT
-			// user_id via staff.user_id FK; returns 404 if no linked staff.
+			// The signed-in tenant's own profile. The institution ID comes from
+			// the resolved session, never from the request.
+			protected.GET("/institution/me", institutionController.GetMe)
+
+			// Authenticated staff member's own Staff profile. Resolved from the
+			// session user_id via staff.user_id FK, scoped to the caller's
+			// institution; returns 404 if no linked staff.
 			protected.GET("/me/staff", staffController.GetMyStaff)
 
 			// Authenticated staff member's own timetable. Resolved strictly from
-			// the JWT user (Staff.user_id FK); client-supplied staff IDs are
-			// ignored, so a role=user account can only ever read its own
-			// timetable. Registered before the admin-only /timetable group.
+			// the session user (Staff.user_id FK) within the caller's
+			// institution; client-supplied staff IDs are ignored, so a
+			// role=user account can only ever read its own timetable.
+			// Registered before the admin-only /timetable group.
 			protected.GET("/timetable/my", timetableController.GetMyTimetable)
 
 			users := protected.Group("/users")
@@ -195,20 +217,24 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 			admin := protected.Group("/admin")
 			admin.Use(middlewares.AdminMiddleware())
 			{
+				// Dashboard counts are scoped to the caller's institution so one
+				// campus's admin never sees another campus's totals. A platform
+				// super_admin (institution_id NULL) gets platform-wide counts.
 				admin.GET("/dashboard", func(c *gin.Context) {
-					var faculties, courses, modules, classes, rooms, staff, timetables int64
-					db.Model(&models.Faculty{}).Count(&faculties)
-					db.Model(&models.Course{}).Count(&courses)
-					db.Model(&models.Module{}).Count(&modules)
-					db.Model(&models.Class{}).Count(&classes)
-					db.Model(&models.Room{}).Count(&rooms)
-					db.Model(&models.Staff{}).Count(&staff)
-					db.Model(&models.Timetable{}).Count(&timetables)
+					inst := middlewares.InstitutionIDFromContext(c)
 
-					userRole := c.GetString("role")
-					c.JSON(200, gin.H{
+					var faculties, courses, modules, classes, rooms, staff, timetables int64
+					repositories.TenantScope(db.Model(&models.Faculty{}), inst).Count(&faculties)
+					repositories.TenantScope(db.Model(&models.Course{}), inst).Count(&courses)
+					repositories.TenantScope(db.Model(&models.Module{}), inst).Count(&modules)
+					repositories.TenantScope(db.Model(&models.Class{}), inst).Count(&classes)
+					repositories.TenantScope(db.Model(&models.Room{}), inst).Count(&rooms)
+					repositories.TenantScope(db.Model(&models.Staff{}), inst).Count(&staff)
+					repositories.TenantScope(db.Model(&models.Timetable{}), inst).Count(&timetables)
+
+					body := gin.H{
 						"message": "Welcome to admin dashboard",
-						"role":    userRole,
+						"role":    c.GetString("role"),
 						"counts": gin.H{
 							"faculties":  faculties,
 							"courses":    courses,
@@ -224,14 +250,33 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 							"Reports",
 							"Timetable Generation",
 						},
-					})
+					}
+					if repositories.IsPlatformScope(inst) {
+						body["scope"] = "platform"
+					} else {
+						body["institution_id"] = inst
+					}
+					c.JSON(200, body)
 				})
 
+				// User stats are scoped to the caller's institution. Users with a
+				// NULL institution_id are platform super_admins and are counted
+				// only for platform callers.
 				admin.GET("/users/stats", func(c *gin.Context) {
+					inst := middlewares.InstitutionIDFromContext(c)
+
+					base := func() *gorm.DB {
+						q := db.Model(&models.User{})
+						if repositories.IsPlatformScope(inst) {
+							return q
+						}
+						return q.Where("institution_id = ?", inst)
+					}
+
 					var totalUsers, activeUsers, adminUsers int64
-					db.Model(&models.User{}).Count(&totalUsers)
-					db.Model(&models.User{}).Where("is_active = ?", true).Count(&activeUsers)
-					db.Model(&models.User{}).Where("role = ? OR role = ?", "administrator", "super_admin").Count(&adminUsers)
+					base().Count(&totalUsers)
+					base().Where("is_active = ?", true).Count(&activeUsers)
+					base().Where("role = ? OR role = ?", "administrator", "super_admin").Count(&adminUsers)
 
 					c.JSON(200, gin.H{
 						"total_users":  totalUsers,
@@ -254,12 +299,24 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 			superadmin.Use(middlewares.SuperAdminMiddleware())
 			{
 				superadmin.GET("/dashboard", func(c *gin.Context) {
+					totalInstitutions, _ := institutionRepo.CountAll()
+					activeInstitutions, _ := institutionRepo.CountByStatus(models.InstitutionStatusActive)
+					pendingInstitutions, _ := institutionRepo.CountByStatus(models.InstitutionStatusPending)
+					suspendedInstitutions, _ := institutionRepo.CountByStatus(models.InstitutionStatusSuspended)
+
 					c.JSON(200, gin.H{
 						"message": "Welcome to super admin dashboard",
+						"institutions": gin.H{
+							"total":     totalInstitutions,
+							"active":    activeInstitutions,
+							"pending":   pendingInstitutions,
+							"suspended": suspendedInstitutions,
+						},
 						"features": []string{
 							"Full System Access",
 							"User Role Management",
 							"System Configuration",
+							"Institution Management",
 							"Advanced Analytics",
 						},
 					})
@@ -277,15 +334,30 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 							"csrf_protection":  config.GetEnv("CSRF_ENABLED", "false") == "true",
 							"rate_limiting":    config.GetEnv("RATE_LIMIT_ENABLED", "true") == "true",
 							"solver":           config.GetEnv("SOLVER_URL", "") != "",
+							"multi_tenancy":    true,
 						},
 					})
 				})
 
-				// Generation settings: system-wide solver knobs — changes affect
-				// every future generation run, hence super_admin only (not the
-				// wider admin group).
+				// Generation settings: the platform default solver knobs, plus
+				// optional per-institution overrides. A super_admin may pass
+				// ?institution_id= (or institution_id in the PUT body) to target
+				// a specific tenant's override.
 				superadmin.GET("/generation-settings", generationSettingsController.Get)
 				superadmin.PUT("/generation-settings", generationSettingsController.Update)
+
+				// Institution management. Gated again by RequirePlatformOnly so
+				// a super_admin who HAS been assigned to an institution (and so
+				// resolved to a tenant scope) cannot manage the tenant list.
+				institutions := superadmin.Group("/institutions")
+				institutions.Use(middlewares.RequirePlatformOnly())
+				{
+					institutions.POST("", institutionController.Create)
+					institutions.GET("", institutionController.GetAll)
+					institutions.GET("/:id", institutionController.Get)
+					institutions.PUT("/:id", institutionController.Update)
+					institutions.DELETE("/:id", institutionController.Delete)
+				}
 			}
 
 			// Timetable Management endpoints (Admin access required)

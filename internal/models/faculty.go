@@ -17,7 +17,12 @@ type Faculty struct {
 	HodPhone    string         `json:"hod_phone"`
 	HodEmail    string         `json:"hod_email"`
 
+	// InstitutionID is the owning tenant. Faculty names are unique per
+	// institution, not globally.
+	InstitutionID uint `gorm:"not null;index" json:"institution_id"`
+
 	// Relationships
-	Courses []Course `json:"courses,omitempty"`
-	Staff   []Staff  `json:"staff,omitempty"`
+	Institution Institution `gorm:"foreignKey:InstitutionID" json:"institution,omitempty"`
+	Courses     []Course    `json:"courses,omitempty"`
+	Staff       []Staff     `json:"staff,omitempty"`
 }

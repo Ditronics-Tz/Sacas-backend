@@ -2,9 +2,7 @@ package controllers
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -17,17 +15,23 @@ import (
 type TimetableController struct {
 	timetableRepo    repositories.TimetableRepository
 	staffRepo        repositories.StaffRepository
+	classRepo        repositories.ClassRepository
+	roomRepo         repositories.RoomRepository
 	timetableService *services.TimetableService
 }
 
 func NewTimetableController(
 	timetableRepo repositories.TimetableRepository,
 	staffRepo repositories.StaffRepository,
+	classRepo repositories.ClassRepository,
+	roomRepo repositories.RoomRepository,
 	timetableService *services.TimetableService,
 ) *TimetableController {
 	return &TimetableController{
 		timetableRepo:    timetableRepo,
 		staffRepo:        staffRepo,
+		classRepo:        classRepo,
+		roomRepo:         roomRepo,
 		timetableService: timetableService,
 	}
 }
@@ -58,7 +62,20 @@ type GenerateTimetableRequest struct {
 	ClassID uint `json:"class_id" binding:"required"`
 }
 
+// classInInstitution confirms the class belongs to the caller's tenant. It is
+// the gate that stops a create or generate request from writing timetable rows
+// into another institution.
+func (c *TimetableController) classInInstitution(institutionID, classID uint) error {
+	if c.classRepo == nil {
+		return errors.New("class repository unavailable")
+	}
+	_, err := c.classRepo.GetByID(institutionID, classID)
+	return err
+}
+
 func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req CreateTimetableRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		logger.Error("Invalid request payload: %v", err)
@@ -71,6 +88,23 @@ func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
 		return
 	}
 
+	// The class, staff, and room must all belong to the caller's institution.
+	// Otherwise the entry would reference (and preload) another tenant's rows.
+	if err := c.classInInstitution(inst, req.ClassID); err != nil {
+		respondNotFound(ctx, "Class not found")
+		return
+	}
+	if _, err := c.staffRepo.GetByID(inst, req.StaffID); err != nil {
+		respondNotFound(ctx, "Staff not found")
+		return
+	}
+	if c.roomRepo != nil {
+		if _, err := c.roomRepo.GetByID(inst, req.RoomID); err != nil {
+			respondNotFound(ctx, "Room not found")
+			return
+		}
+	}
+
 	timetable := &models.Timetable{
 		ClassID:   req.ClassID,
 		ModuleID:  req.ModuleID,
@@ -80,21 +114,23 @@ func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
 		Day:       req.Day,
 		StartTime: req.StartTime,
 		EndTime:   req.EndTime,
+		// Stamped from the session, never from the payload.
+		InstitutionID: inst,
 	}
 
-	if err := c.timetableService.ValidateTimeSlot(timetable, 0); err != nil {
+	if err := c.timetableService.ValidateTimeSlot(inst, timetable, 0); err != nil {
 		logger.Error("Timetable validation failed: %v", err)
 		ctx.JSON(http.StatusConflict, gin.H{"error": "Scheduling conflict detected", "details": err.Error()})
 		return
 	}
 
-	if err := c.timetableRepo.Create(timetable); err != nil {
+	if err := c.timetableRepo.Create(inst, timetable); err != nil {
 		logger.Error("Failed to create timetable: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create timetable"})
 		return
 	}
 
-	created, err := c.timetableRepo.GetByID(timetable.ID)
+	created, err := c.timetableRepo.GetByID(inst, timetable.ID)
 	if err != nil {
 		logger.Error("Failed to fetch created timetable: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch created timetable"})
@@ -106,17 +142,18 @@ func (c *TimetableController) CreateTimetable(ctx *gin.Context) {
 }
 
 func (c *TimetableController) GetTimetable(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid timetable ID"})
 		return
 	}
 
-	timetable, err := c.timetableRepo.GetByID(uint(id))
+	timetable, err := c.timetableRepo.GetByID(inst, id)
 	if err != nil {
 		logger.Error("Failed to get timetable: %v", err)
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Timetable entry not found"})
+		respondRepoError(ctx, "Timetable entry not found", err)
 		return
 	}
 
@@ -124,14 +161,22 @@ func (c *TimetableController) GetTimetable(ctx *gin.Context) {
 }
 
 func (c *TimetableController) GetTimetableByClass(ctx *gin.Context) {
-	classIDStr := ctx.Param("class_id")
-	classID, err := strconv.ParseUint(classIDStr, 10, 32)
+	inst := tenantID(ctx)
+
+	classID, err := parseIDParam(ctx, "class_id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid class ID"})
 		return
 	}
 
-	timetables, err := c.timetableRepo.GetByClass(uint(classID))
+	// A class from another institution is reported as not found rather than
+	// as an empty timetable.
+	if err := c.classInInstitution(inst, classID); err != nil {
+		respondNotFound(ctx, "Class not found")
+		return
+	}
+
+	timetables, err := c.timetableRepo.GetByClass(inst, classID)
 	if err != nil {
 		logger.Error("Failed to get timetable for class: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get timetable"})
@@ -142,15 +187,21 @@ func (c *TimetableController) GetTimetableByClass(ctx *gin.Context) {
 }
 
 func (c *TimetableController) GetTimetableByStaff(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	// Route is /by-staff/:staff_id to avoid clashing with staff CRUD /staff/:id
-	staffIDStr := ctx.Param("staff_id")
-	staffID, err := strconv.ParseUint(staffIDStr, 10, 32)
+	staffID, err := parseIDParam(ctx, "staff_id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid staff ID"})
 		return
 	}
 
-	timetables, err := c.timetableRepo.GetByStaff(uint(staffID))
+	if _, err := c.staffRepo.GetByID(inst, staffID); err != nil {
+		respondNotFound(ctx, "Staff not found")
+		return
+	}
+
+	timetables, err := c.timetableRepo.GetByStaff(inst, staffID)
 	if err != nil {
 		logger.Error("Failed to get timetable for staff: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get timetable"})
@@ -165,14 +216,15 @@ func (c *TimetableController) GetTimetableByStaff(ctx *gin.Context) {
 // A course with no classes (or no entries) returns 200 with an empty array,
 // not 404 — that is a legitimate state, not an error.
 func (c *TimetableController) GetTimetableByCourse(ctx *gin.Context) {
-	courseIDStr := ctx.Param("course_id")
-	courseID, err := strconv.ParseUint(courseIDStr, 10, 32)
+	inst := tenantID(ctx)
+
+	courseID, err := parseIDParam(ctx, "course_id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid course ID"})
 		return
 	}
 
-	timetables, err := c.timetableRepo.GetByCourse(uint(courseID))
+	timetables, err := c.timetableRepo.GetByCourse(inst, courseID)
 	if err != nil {
 		logger.Error("Failed to get timetable for course: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get timetable"})
@@ -189,49 +241,33 @@ func (c *TimetableController) GetTimetableByCourse(ctx *gin.Context) {
 //
 // Security invariants:
 //   - Requires authentication (JWT middleware on the protected group).
-//   - The Staff record is resolved ONLY from the authenticated user_id in the
-//     JWT (Staff.user_id FK). Any staff_id/query/body value sent by the client
-//     is ignored, so a role=user account can never read another staff
-//     member's timetable by manipulating an ID.
+//   - The Staff record is resolved ONLY from the authenticated user_id
+//     (Staff.user_id FK), and only within the caller's institution. Any
+//     staff_id/query/body value sent by the client is ignored, so a role=user
+//     account can never read another staff member's timetable — including one
+//     at a different institution — by manipulating an ID.
 //   - Existing admin endpoints (/timetable/by-staff/:staff_id etc.) are
 //     untouched.
 func (c *TimetableController) GetMyTimetable(ctx *gin.Context) {
-	// 1. Obtain the authenticated User from the JWT/session context.
-	rawUserID, exists := ctx.Get("user_id")
-	if !exists || rawUserID == nil {
+	inst := tenantID(ctx)
+
+	userID, ok := currentUserID(ctx)
+	if !ok {
 		ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
 		return
 	}
-	var userID uint
-	switch v := rawUserID.(type) {
-	case float64:
-		userID = uint(v)
-	case int:
-		userID = uint(v)
-	case uint:
-		userID = v
-	case int64:
-		userID = uint(v)
-	default:
-		var n uint64
-		if _, err := fmt.Sscanf(fmt.Sprint(v), "%d", &n); err != nil {
-			ctx.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid user in token"})
-			return
-		}
-		userID = uint(n)
-	}
 
-	// 2. Resolve that User to their Staff record via the existing FK
-	//    relationship (staff.user_id). No client-provided staff_id is read.
-	staff, err := c.staffRepo.GetByUserID(userID)
+	// Resolve that User to their Staff record via the existing FK
+	// relationship (staff.user_id). No client-provided staff_id is read.
+	staff, err := c.staffRepo.GetByUserID(inst, userID)
 	if err != nil {
 		logger.Warn("No staff profile linked to user %d for /timetable/my", userID)
 		ctx.JSON(http.StatusNotFound, gin.H{"error": "No staff profile is linked to your account"})
 		return
 	}
 
-	// 3. Return only this staff member's timetable, in the frontend-compatible shape.
-	timetables, err := c.timetableRepo.GetByStaff(staff.ID)
+	// Return only this staff member's timetable, in the frontend-compatible shape.
+	timetables, err := c.timetableRepo.GetByStaff(inst, staff.ID)
 	if err != nil {
 		logger.Error("Failed to get timetable for staff %d: %v", staff.ID, err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get timetable"})
@@ -242,8 +278,9 @@ func (c *TimetableController) GetMyTimetable(ctx *gin.Context) {
 }
 
 func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid timetable ID"})
 		return
@@ -256,14 +293,20 @@ func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 		return
 	}
 
-	timetable, err := c.timetableRepo.GetByID(uint(id))
+	// An entry owned by another institution resolves to not-found here, so the
+	// update below can never reach it.
+	timetable, err := c.timetableRepo.GetByID(inst, id)
 	if err != nil {
 		logger.Error("Failed to get timetable: %v", err)
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Timetable entry not found"})
+		respondRepoError(ctx, "Timetable entry not found", err)
 		return
 	}
 
 	if req.ClassID != nil {
+		if err := c.classInInstitution(inst, *req.ClassID); err != nil {
+			respondNotFound(ctx, "Class not found")
+			return
+		}
 		timetable.ClassID = *req.ClassID
 	}
 	if req.ModuleID != nil {
@@ -273,9 +316,19 @@ func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 		timetable.SubjectID = req.SubjectID
 	}
 	if req.StaffID != nil {
+		if _, err := c.staffRepo.GetByID(inst, *req.StaffID); err != nil {
+			respondNotFound(ctx, "Staff not found")
+			return
+		}
 		timetable.StaffID = *req.StaffID
 	}
 	if req.RoomID != nil {
+		if c.roomRepo != nil {
+			if _, err := c.roomRepo.GetByID(inst, *req.RoomID); err != nil {
+				respondNotFound(ctx, "Room not found")
+				return
+			}
+		}
 		timetable.RoomID = *req.RoomID
 	}
 	if req.Day != nil {
@@ -288,13 +341,13 @@ func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 		timetable.EndTime = *req.EndTime
 	}
 
-	if err := c.timetableService.ValidateTimeSlot(timetable, uint(id)); err != nil {
+	if err := c.timetableService.ValidateTimeSlot(inst, timetable, id); err != nil {
 		logger.Error("Timetable validation failed: %v", err)
 		ctx.JSON(http.StatusConflict, gin.H{"error": "Scheduling conflict detected", "details": err.Error()})
 		return
 	}
 
-	if err := c.timetableRepo.Update(timetable); err != nil {
+	if err := c.timetableRepo.Update(inst, timetable); err != nil {
 		logger.Error("Failed to update timetable: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update timetable"})
 		return
@@ -305,16 +358,17 @@ func (c *TimetableController) UpdateTimetable(ctx *gin.Context) {
 }
 
 func (c *TimetableController) DeleteTimetable(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid timetable ID"})
 		return
 	}
 
-	if err := c.timetableRepo.Delete(uint(id)); err != nil {
+	if err := c.timetableRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete timetable: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete timetable"})
+		respondRepoError(ctx, "Timetable entry not found", err)
 		return
 	}
 
@@ -323,6 +377,8 @@ func (c *TimetableController) DeleteTimetable(ctx *gin.Context) {
 }
 
 func (c *TimetableController) GenerateTimetable(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req GenerateTimetableRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		logger.Error("Invalid request payload: %v", err)
@@ -330,11 +386,16 @@ func (c *TimetableController) GenerateTimetable(ctx *gin.Context) {
 		return
 	}
 
-	result, err := c.timetableService.GenerateTimetable(req.ClassID)
+	result, err := c.timetableService.GenerateTimetable(inst, req.ClassID)
 	if err != nil {
 		logger.Error("Failed to generate timetable: %v", err)
 		status := http.StatusInternalServerError
 		body := gin.H{"error": "Failed to generate timetable", "details": err.Error()}
+		// A class from another institution is a 404, not a generation failure.
+		if errors.Is(err, services.ErrClassNotInInstitution) {
+			respondNotFound(ctx, "Class not found")
+			return
+		}
 		if result != nil {
 			body["status"] = result.Status
 			body["unsat_reasons"] = result.UnsatReasons
@@ -345,7 +406,7 @@ func (c *TimetableController) GenerateTimetable(ctx *gin.Context) {
 				status = http.StatusUnprocessableEntity
 			}
 		}
-		if strings.Contains(err.Error(), "infeasible") {
+		if errors.Is(err, services.ErrInfeasible) || strings.Contains(err.Error(), "infeasible") {
 			status = http.StatusUnprocessableEntity
 		}
 		ctx.JSON(status, body)
@@ -366,17 +427,23 @@ func (c *TimetableController) GenerateTimetable(ctx *gin.Context) {
 }
 
 func (c *TimetableController) PreviewGenerateTimetable(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req GenerateTimetableRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
 		return
 	}
 
-	result, err := c.timetableService.PreviewTimetable(req.ClassID)
+	result, err := c.timetableService.PreviewTimetable(inst, req.ClassID)
 	if err != nil {
 		logger.Error("Failed to preview timetable: %v", err)
 		status := http.StatusInternalServerError
 		body := gin.H{"error": "Failed to preview timetable", "details": err.Error()}
+		if errors.Is(err, services.ErrClassNotInInstitution) {
+			respondNotFound(ctx, "Class not found")
+			return
+		}
 		if result != nil {
 			body["status"] = result.Status
 			body["unsat_reasons"] = result.UnsatReasons

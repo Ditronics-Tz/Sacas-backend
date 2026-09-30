@@ -1,8 +1,8 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"go_boilerplate/internal/models"
@@ -12,10 +12,22 @@ import (
 
 type ModuleController struct {
 	moduleRepo repositories.ModuleRepository
+	// courseRepo is used to verify that a referenced course belongs to the
+	// caller's institution. Without it, a module could point at another
+	// tenant's course and leak that course's name through the preload.
+	courseRepo repositories.CourseRepository
 }
 
-func NewModuleController(moduleRepo repositories.ModuleRepository) *ModuleController {
-	return &ModuleController{moduleRepo: moduleRepo}
+func NewModuleController(moduleRepo repositories.ModuleRepository, courseRepo repositories.CourseRepository) *ModuleController {
+	return &ModuleController{moduleRepo: moduleRepo, courseRepo: courseRepo}
+}
+
+// courseExists confirms a course ID resolves inside the caller's institution.
+func (c *ModuleController) courseExists(_ *gin.Context, institutionID, courseID uint) (*models.Course, error) {
+	if c.courseRepo == nil {
+		return nil, errors.New("course repository unavailable")
+	}
+	return c.courseRepo.GetByID(institutionID, courseID)
 }
 
 type CreateModuleRequest struct {
@@ -42,6 +54,8 @@ type UpdateModuleRequest struct {
 }
 
 func (c *ModuleController) CreateModule(ctx *gin.Context) {
+	inst := tenantID(ctx)
+
 	var req CreateModuleRequest
 	if err := ctx.ShouldBindJSON(&req); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload", "details": err.Error()})
@@ -60,6 +74,18 @@ func (c *ModuleController) CreateModule(ctx *gin.Context) {
 		return
 	}
 
+	// A module may only hang off a course in the same institution. Without
+	// this check a tenant could reference another tenant's course ID and pull
+	// its modules into this tenant's generation run.
+	if req.CourseID != nil {
+		course, err := c.courseExists(ctx, inst, *req.CourseID)
+		if err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid course_id", "details": "course not found in this institution"})
+			return
+		}
+		_ = course
+	}
+
 	module := &models.Module{
 		Name:        req.Name,
 		Code:        req.Code,
@@ -69,29 +95,32 @@ func (c *ModuleController) CreateModule(ctx *gin.Context) {
 		RequiresLab: req.RequiresLab,
 		Semester:    req.Semester,
 		NtaLevel:    req.NtaLevel,
+		// Stamped from the session, never from the payload.
+		InstitutionID: inst,
 	}
 
-	if err := c.moduleRepo.Create(module); err != nil {
+	if err := c.moduleRepo.Create(inst, module); err != nil {
 		logger.Error("Failed to create module: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create module"})
 		return
 	}
 
-	created, _ := c.moduleRepo.GetByID(module.ID)
+	created, _ := c.moduleRepo.GetByID(inst, module.ID)
 	ctx.JSON(http.StatusCreated, gin.H{"message": "Module created successfully", "module": created})
 }
 
 func (c *ModuleController) GetModule(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid module ID"})
 		return
 	}
 
-	module, err := c.moduleRepo.GetByID(uint(id))
+	module, err := c.moduleRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Module not found"})
+		respondRepoError(ctx, "Module not found", err)
 		return
 	}
 
@@ -99,13 +128,11 @@ func (c *ModuleController) GetModule(ctx *gin.Context) {
 }
 
 func (c *ModuleController) GetAllModules(ctx *gin.Context) {
-	limit, _ := strconv.Atoi(ctx.DefaultQuery("limit", "10"))
-	offset, _ := strconv.Atoi(ctx.DefaultQuery("offset", "0"))
-	if limit <= 0 {
-		limit = 10
-	}
+	inst := tenantID(ctx)
 
-	modules, err := c.moduleRepo.GetAll(limit, offset)
+	limit, offset := parsePagination(ctx)
+
+	modules, err := c.moduleRepo.GetAll(inst, limit, offset)
 	if err != nil {
 		logger.Error("Failed to get modules: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get modules"})
@@ -116,8 +143,9 @@ func (c *ModuleController) GetAllModules(ctx *gin.Context) {
 }
 
 func (c *ModuleController) UpdateModule(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid module ID"})
 		return
@@ -129,9 +157,9 @@ func (c *ModuleController) UpdateModule(ctx *gin.Context) {
 		return
 	}
 
-	module, err := c.moduleRepo.GetByID(uint(id))
+	module, err := c.moduleRepo.GetByID(inst, id)
 	if err != nil {
-		ctx.JSON(http.StatusNotFound, gin.H{"error": "Module not found"})
+		respondRepoError(ctx, "Module not found", err)
 		return
 	}
 
@@ -144,6 +172,11 @@ func (c *ModuleController) UpdateModule(ctx *gin.Context) {
 	if req.ClearCourse {
 		module.CourseID = nil
 	} else if req.CourseID != nil {
+		// Re-pointing a module at another institution's course is rejected.
+		if _, err := c.courseExists(ctx, inst, *req.CourseID); err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid course_id", "details": "course not found in this institution"})
+			return
+		}
 		module.CourseID = req.CourseID
 	}
 	if req.CreditHours != nil {
@@ -169,27 +202,28 @@ func (c *ModuleController) UpdateModule(ctx *gin.Context) {
 		module.NtaLevel = *req.NtaLevel
 	}
 
-	if err := c.moduleRepo.Update(module); err != nil {
+	if err := c.moduleRepo.Update(inst, module); err != nil {
 		logger.Error("Failed to update module: %v", err)
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update module"})
 		return
 	}
 
-	updated, _ := c.moduleRepo.GetByID(module.ID)
+	updated, _ := c.moduleRepo.GetByID(inst, module.ID)
 	ctx.JSON(http.StatusOK, gin.H{"message": "Module updated successfully", "module": updated})
 }
 
 func (c *ModuleController) DeleteModule(ctx *gin.Context) {
-	idStr := ctx.Param("id")
-	id, err := strconv.ParseUint(idStr, 10, 32)
+	inst := tenantID(ctx)
+
+	id, err := parseIDParam(ctx, "id")
 	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": "Invalid module ID"})
 		return
 	}
 
-	if err := c.moduleRepo.Delete(uint(id)); err != nil {
+	if err := c.moduleRepo.Delete(inst, id); err != nil {
 		logger.Error("Failed to delete module: %v", err)
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete module"})
+		respondRepoError(ctx, "Module not found", err)
 		return
 	}
 

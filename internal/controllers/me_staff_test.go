@@ -10,18 +10,30 @@ import (
 	"go_boilerplate/internal/models"
 )
 
-// TestGetMyStaff_* covers GET /api/protected/me/staff
-func TestGetMyStaff_WithLinkedStaff(t *testing.T) {
-	userID := uint(7)
-	staff := &models.Staff{ID: 42, Name: "Dr A", Email: "a@example.com", FacultyID: 1, UserID: &userID}
-	repo := &staffRepoWithUser{staff: staff}
+// newMyStaffRouter emulates the protected group: the tenant middleware has
+// already put user_id and institution_id on the context.
+func newMyStaffRouter(repo *stubStaffRepo, sessionUserID, sessionInstitution uint) *gin.Engine {
 	ctrl := NewStaffController(repo, nil)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/api/protected/me/staff", func(c *gin.Context) {
-		c.Set("user_id", float64(userID))
+		c.Set("user_id", sessionUserID)
+		c.Set("institution_id", sessionInstitution)
+		c.Set("role", string(models.RoleUser))
 		ctrl.GetMyStaff(c)
 	})
+	return r
+}
+
+// TestGetMyStaff_* covers GET /api/protected/me/staff
+func TestGetMyStaff_WithLinkedStaff(t *testing.T) {
+	userID := uint(7)
+	repo := newStubStaffRepo()
+	repo.seedStaff(&models.Staff{
+		ID: 42, Name: "Dr A", Email: "a@example.com", FacultyID: 1,
+		UserID: &userID, InstitutionID: tenantA,
+	})
+	r := newMyStaffRouter(repo, userID, tenantA)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/protected/me/staff", nil)
 	w := httptest.NewRecorder()
@@ -45,14 +57,7 @@ func TestGetMyStaff_WithLinkedStaff(t *testing.T) {
 }
 
 func TestGetMyStaff_NoLinkedStaff(t *testing.T) {
-	repo := &staffRepoWithUser{staff: nil}
-	ctrl := NewStaffController(repo, nil)
-	gin.SetMode(gin.TestMode)
-	r := gin.New()
-	r.GET("/api/protected/me/staff", func(c *gin.Context) {
-		c.Set("user_id", float64(7))
-		ctrl.GetMyStaff(c)
-	})
+	r := newMyStaffRouter(newStubStaffRepo(), 7, tenantA)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/protected/me/staff", nil)
 	w := httptest.NewRecorder()
@@ -75,7 +80,7 @@ func TestGetMyStaff_NoLinkedStaff(t *testing.T) {
 }
 
 func TestGetMyStaff_Unauthenticated(t *testing.T) {
-	ctrl := NewStaffController(&staffRepoWithUser{}, nil)
+	ctrl := NewStaffController(newStubStaffRepo(), nil)
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/api/protected/me/staff", ctrl.GetMyStaff)
@@ -86,5 +91,28 @@ func TestGetMyStaff_Unauthenticated(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 when no user_id in context, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestGetMyStaff_CrossTenantLink is the isolation test for this endpoint: a
+// session scoped to institution A must not resolve a staff record that belongs
+// to institution B, even though the user_id genuinely matches.
+func TestGetMyStaff_CrossTenantLink(t *testing.T) {
+	userID := uint(7)
+	repo := newStubStaffRepo()
+	repo.seedStaff(&models.Staff{
+		ID: 42, Name: "Dr B-Staff", Email: "b@example.com", FacultyID: 1,
+		UserID: &userID, InstitutionID: tenantB,
+	})
+	r := newMyStaffRouter(repo, userID, tenantA)
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/protected/me/staff", nil))
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 resolving a cross-tenant staff link, got %d body=%s", w.Code, w.Body.String())
+	}
+	if contains(w.Body.String(), "Dr B-Staff") {
+		t.Fatalf("response leaked another tenant's staff: %s", w.Body.String())
 	}
 }

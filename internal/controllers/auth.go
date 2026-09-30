@@ -173,7 +173,9 @@ func (ac *AuthController) Login(c *gin.Context) {
 	// Update last login time
 	now := time.Now()
 	user.LastLoginAt = &now
-	ac.userRepo.Update(user)
+	// Scoped to the user's own institution: the login flow has no tenant in
+	// the request context yet, and the user is the subject of the update.
+	ac.userRepo.UpdateSelf(user)
 
 	secret, err := config.ResolveJWTSecret()
 	if err != nil {
@@ -292,7 +294,7 @@ func (ac *AuthController) VerifyEmail(c *gin.Context) {
 
 	user.IsVerified = true
 	user.IsActive = true // Activate user upon verification
-	if err := ac.userRepo.Update(user); err != nil {
+	if err := ac.userRepo.UpdateSelf(user); err != nil {
 		logger.Error("Failed to update user verification status: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify email"})
 		return
