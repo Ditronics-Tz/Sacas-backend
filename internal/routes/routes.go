@@ -240,6 +240,9 @@ func SetupRoutes(router *gin.Engine, db *gorm.DB, otpController *controllers.OTP
 					})
 				})
 
+				admin.GET("/generation-settings", generationSettingsController.Get)
+				admin.PUT("/generation-settings", generationSettingsController.Update)
+
 				// Metrics — previously public; now admin-only (authenticated)
 				admin.GET("/metrics", func(c *gin.Context) {
 					if metrics, exists := c.Get("metrics"); exists {
