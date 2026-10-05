@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"go_boilerplate/internal/config"
 	"go_boilerplate/internal/models"
 	"go_boilerplate/internal/repositories"
 	"go_boilerplate/pkg/logger"
@@ -24,6 +25,7 @@ func NewGenerationSettingsController(repo repositories.GenerationSettingsReposit
 }
 
 type UpdateGenerationSettingsRequest struct {
+	Engine        *string             `json:"engine"`
 	TimeBudgetSec *float64            `json:"time_budget_sec"`
 	SoftWeights   *map[string]float64 `json:"soft_weights"`
 }
@@ -38,7 +40,10 @@ func (c *GenerationSettingsController) Get(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{"settings": settings})
+	ctx.JSON(http.StatusOK, gin.H{
+		"settings":         settings,
+		"solver_available": config.GetEnv("SOLVER_URL", "") != "",
+	})
 }
 
 // Update handles PUT .../generation-settings — strictly validates every
@@ -68,6 +73,18 @@ func (c *GenerationSettingsController) Update(ctx *gin.Context) {
 			return
 		}
 		settings.TimeBudgetSec = *req.TimeBudgetSec
+	}
+
+	if req.Engine != nil {
+		if err := validateGenerationEngine(*req.Engine); err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if *req.Engine == "solver" && config.GetEnv("SOLVER_URL", "") == "" {
+			ctx.JSON(http.StatusBadRequest, gin.H{"error": "solver engine is unavailable because SOLVER_URL is not configured"})
+			return
+		}
+		settings.Engine = *req.Engine
 	}
 
 	if req.SoftWeights != nil {
@@ -111,6 +128,15 @@ func validateTimeBudget(v float64) error {
 		return settingsValidationError("time_budget_sec must not exceed 300 seconds")
 	}
 	return nil
+}
+
+func validateGenerationEngine(engine string) error {
+	for _, allowed := range models.AllowedGenerationEngines {
+		if engine == allowed {
+			return nil
+		}
+	}
+	return settingsValidationError("engine must be one of: " + strings.Join(models.AllowedGenerationEngines, ", "))
 }
 
 type settingsValidationError string

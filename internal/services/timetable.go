@@ -73,6 +73,22 @@ func (s *TimetableService) PreviewTimetable(classID uint) (*GenerateResult, erro
 }
 
 func (s *TimetableService) generate(classID uint, persist bool) (*GenerateResult, error) {
+	engine, err := s.generationEngine()
+	if err != nil {
+		return nil, err
+	}
+
+	if engine == "greedy" {
+		return s.generateGreedy(classID, persist)
+	}
+
+	if engine == "solver" {
+		if s.solver == nil || !s.solver.Enabled() {
+			return nil, fmt.Errorf("%w: solver engine selected but SOLVER_URL is not configured", ErrSolverUnreachable)
+		}
+		return s.generateWithSolver(classID, persist)
+	}
+
 	if s.solver != nil && s.solver.Enabled() {
 		result, err := s.generateWithSolver(classID, persist)
 		if err == nil {
@@ -94,6 +110,28 @@ func (s *TimetableService) generate(classID uint, persist bool) (*GenerateResult
 	}
 
 	return s.generateGreedy(classID, persist)
+}
+
+func (s *TimetableService) generationEngine() (string, error) {
+	settings := models.DefaultGenerationSettings()
+	if s.generationSettingsRepo != nil {
+		loaded, err := s.generationSettingsRepo.Get()
+		if err != nil && !errors.Is(err, repositories.ErrNotConfigured) {
+			return "", fmt.Errorf("failed to load generation settings: %w", err)
+		}
+		if loaded != nil {
+			settings = loaded
+		}
+	}
+	if settings.Engine == "" {
+		return models.DefaultGenerationEngine, nil
+	}
+	for _, allowed := range models.AllowedGenerationEngines {
+		if settings.Engine == allowed {
+			return settings.Engine, nil
+		}
+	}
+	return "", fmt.Errorf("invalid persisted generation engine %q", settings.Engine)
 }
 
 func (s *TimetableService) generateWithSolver(classID uint, persist bool) (*GenerateResult, error) {

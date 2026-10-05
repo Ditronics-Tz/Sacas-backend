@@ -2,6 +2,8 @@ package services
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"gorm.io/datatypes"
@@ -192,5 +194,61 @@ func TestBuildSolverRequest_DBErrorFailsLoudly(t *testing.T) {
 
 	if _, err := svc.buildSolverRequest(1, false); err == nil {
 		t.Fatalf("expected error on settings repo failure, got nil")
+	}
+}
+
+type noModuleRepo struct{ *stubModuleRepo }
+
+func (s noModuleRepo) GetByCourse(courseID uint, limit, offset int) ([]models.Module, error) {
+	return nil, nil
+}
+
+func TestGenerate_ConfiguredEngineControlsResultEngine(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"optimal","assignments":[]}`))
+	}))
+	defer server.Close()
+
+	cases := []struct {
+		name       string
+		engine     string
+		wantEngine string
+		withSolver bool
+	}{
+		{name: "explicit solver", engine: "solver", wantEngine: "solver", withSolver: true},
+		{name: "auto uses configured solver", engine: "auto", wantEngine: "solver", withSolver: true},
+		{name: "explicit greedy", engine: "greedy", wantEngine: "greedy"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &stubSettingsRepo{settings: &models.GenerationSettings{
+				Engine:        tc.engine,
+				TimeBudgetSec: 30,
+			}}
+			svc := newServiceForBuildTest(repo)
+			svc.moduleRepo = noModuleRepo{stubModuleRepo: &stubModuleRepo{}}
+			if tc.withSolver {
+				svc.solver = &SolverClient{baseURL: server.URL, httpClient: server.Client()}
+			}
+
+			result, err := svc.PreviewTimetable(1)
+			if err != nil {
+				t.Fatalf("generation failed: %v", err)
+			}
+			if result.Engine != tc.wantEngine {
+				t.Fatalf("expected result.engine %q, got %q", tc.wantEngine, result.Engine)
+			}
+		})
+	}
+}
+
+func TestGenerate_ExplicitSolverFailsIfUnavailable(t *testing.T) {
+	repo := &stubSettingsRepo{settings: &models.GenerationSettings{Engine: "solver"}}
+	svc := newServiceForBuildTest(repo)
+
+	result, err := svc.PreviewTimetable(1)
+	if err == nil || result != nil {
+		t.Fatalf("expected explicit solver selection to fail closed, result=%+v err=%v", result, err)
 	}
 }

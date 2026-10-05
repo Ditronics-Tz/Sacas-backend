@@ -55,6 +55,7 @@ func (r *generationSettingsRepository) Upsert(settings *models.GenerationSetting
 		}
 		return tx.Model(&existing).Updates(map[string]interface{}{
 			"time_budget_sec": settings.TimeBudgetSec,
+			"engine":          settings.Engine,
 			"soft_weights":    settings.SoftWeights,
 		}).Error
 	})

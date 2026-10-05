@@ -22,6 +22,10 @@ type GenerationSettings struct {
 	// value cannot lock the solver for an hour.
 	TimeBudgetSec float64 `gorm:"default:30" json:"time_budget_sec"`
 
+	// Engine selects the generation strategy. Auto uses the configured solver
+	// when available and follows deployment fallback policy for solver failures.
+	Engine string `gorm:"default:auto" json:"engine"`
+
 	// SoftWeights holds named soft-constraint weights sent to the solver as
 	// soft_weights (JSONB). Keys are validated server-side against
 	// AllowedSoftWeightKeys so admins cannot inject keys the solver will
@@ -34,7 +38,8 @@ const (
 	SingletonID uint = 1
 
 	// DefaultTimeBudgetSec is the value hardcoded in buildSolverRequest today.
-	DefaultTimeBudgetSec = 30.0
+	DefaultTimeBudgetSec    = 30.0
+	DefaultGenerationEngine = "auto"
 
 	// MaxTimeBudgetSec caps the configured budget (sanity upper bound).
 	MaxTimeBudgetSec = 300.0
@@ -49,12 +54,15 @@ var AllowedSoftWeightKeys = []string{
 	"session_spread_weight",
 }
 
+var AllowedGenerationEngines = []string{"auto", "solver", "greedy"}
+
 // DefaultGenerationSettings returns a populated singleton with the same
 // defaults hardcoded in the service today (30s budget, no soft weights).
 func DefaultGenerationSettings() *GenerationSettings {
 	return &GenerationSettings{
 		ID:            SingletonID,
 		TimeBudgetSec: DefaultTimeBudgetSec,
+		Engine:        DefaultGenerationEngine,
 		SoftWeights:   datatypes.JSON(`{}`),
 	}
 }

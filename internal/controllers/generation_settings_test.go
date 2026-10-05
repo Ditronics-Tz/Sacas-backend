@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/datatypes"
 
+	"go_boilerplate/internal/middlewares"
 	"go_boilerplate/internal/models"
 	"go_boilerplate/internal/repositories"
 )
@@ -66,6 +67,9 @@ func TestGetGenerationSettings_NotConfiguredReturnsDefaults(t *testing.T) {
 	if !bytes.Contains(w.Body.Bytes(), []byte(`"time_budget_sec":30`)) {
 		t.Fatalf("expected default time_budget_sec 30, got %s", w.Body.String())
 	}
+	if !bytes.Contains(w.Body.Bytes(), []byte(`"engine":"auto"`)) {
+		t.Fatalf("expected default engine auto, got %s", w.Body.String())
+	}
 }
 
 func TestGetGenerationSettings_DBError(t *testing.T) {
@@ -81,10 +85,11 @@ func TestGetGenerationSettings_DBError(t *testing.T) {
 }
 
 func TestUpdateGenerationSettings_HappyPath(t *testing.T) {
+	t.Setenv("SOLVER_URL", "http://solver.test")
 	repo := &stubGenerationSettingsRepo{}
 	r := newGenerationSettingsRouter(repo)
 
-	body := `{"time_budget_sec": 60, "soft_weights": {"preferred_start_weight": 2.5, "session_spread_weight": 1}}`
+	body := `{"engine":"solver", "time_budget_sec": 60, "soft_weights": {"preferred_start_weight": 2.5, "session_spread_weight": 1}}`
 	req := httptest.NewRequest(http.MethodPut, "/generation-settings", bytes.NewBufferString(body))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -98,6 +103,9 @@ func TestUpdateGenerationSettings_HappyPath(t *testing.T) {
 	if repo.row.TimeBudgetSec != 60 {
 		t.Fatalf("expected stored time_budget_sec 60, got %v", repo.row.TimeBudgetSec)
 	}
+	if repo.row.Engine != "solver" {
+		t.Fatalf("expected stored engine solver, got %q", repo.row.Engine)
+	}
 }
 
 func TestUpdateGenerationSettings_ValidationFailures(t *testing.T) {
@@ -108,6 +116,7 @@ func TestUpdateGenerationSettings_ValidationFailures(t *testing.T) {
 		{"zero budget", `{"time_budget_sec": 0}`},
 		{"negative budget", `{"time_budget_sec": -5}`},
 		{"budget over cap", `{"time_budget_sec": 301}`},
+		{"unknown engine", `{"engine":"quantum"}`},
 		{"unknown weight key", `{"soft_weights": {"nonsense_weight": 1}}`},
 		{"negative weight", `{"soft_weights": {"preferred_start_weight": -1}}`},
 	}
@@ -125,6 +134,50 @@ func TestUpdateGenerationSettings_ValidationFailures(t *testing.T) {
 			}
 			if repo.upserts != 0 {
 				t.Fatalf("invalid payload must not reach the repository")
+			}
+		})
+	}
+}
+
+func TestUpdateGenerationSettings_RejectsSolverWhenUnavailable(t *testing.T) {
+	t.Setenv("SOLVER_URL", "")
+	repo := &stubGenerationSettingsRepo{}
+	r := newGenerationSettingsRouter(repo)
+	req := httptest.NewRequest(http.MethodPut, "/generation-settings", bytes.NewBufferString(`{"engine":"solver"}`))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 when solver is unconfigured, got %d body=%s", w.Code, w.Body.String())
+	}
+	if repo.upserts != 0 {
+		t.Fatal("unavailable solver selection must not be persisted")
+	}
+}
+
+func TestGenerationSettings_AdminOnlyAuthorization(t *testing.T) {
+	secret := "generation-settings-auth-test-secret-32"
+	t.Setenv("JWT_SECRET", secret)
+	t.Setenv("ENV", "development")
+	ctrl := NewGenerationSettingsController(&stubGenerationSettingsRepo{})
+	r := gin.New()
+	r.GET("/generation-settings", middlewares.JWTAuthMiddleware(), middlewares.AdminMiddleware(), ctrl.Get)
+
+	for _, tc := range []struct {
+		role string
+		want int
+	}{
+		{role: string(models.RoleUser), want: http.StatusForbidden},
+		{role: string(models.RoleAdmin), want: http.StatusOK},
+		{role: string(models.RoleSuperAdmin), want: http.StatusOK},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/generation-settings", nil)
+			req.Header.Set("Authorization", "Bearer "+signTokenForTest(t, tc.role, secret))
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			if w.Code != tc.want {
+				t.Fatalf("expected status %d for role %s, got %d body=%s", tc.want, tc.role, w.Code, w.Body.String())
 			}
 		})
 	}
